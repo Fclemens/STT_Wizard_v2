@@ -286,14 +286,18 @@ class Capture:
 # ── Post-processing ────────────────────────────────────────────────────────
 
 
-def mix_tracks(track_paths: list[Path], target: Path) -> None:
-    """Mix tracks into a 16 kHz mono WAV for Whisper (no FFmpeg needed)."""
-    from stt_engine import SAMPLE_RATE, load_audio
+EXPORT_RATE = 48000
+EXPORT_BITRATE = 128_000
+
+
+def _mix(paths: list[Path], rate: int) -> np.ndarray:
+    """Decode, resample and sum sources into one mono float32 signal."""
+    from stt_engine import load_audio
 
     try:
-        tracks = [load_audio(path) for path in track_paths]
+        tracks = [load_audio(path, rate=rate) for path in paths]
     except Exception as exc:  # noqa: BLE001
-        raise RecorderError(f"Could not read the recorded tracks: {exc}") from exc
+        raise RecorderError(f"Could not read the audio: {exc}") from exc
     length = max((len(track) for track in tracks), default=0)
     mix = np.zeros(length, dtype=np.float32)
     for track in tracks:
@@ -301,11 +305,41 @@ def mix_tracks(track_paths: list[Path], target: Path) -> None:
     peak = float(np.abs(mix).max()) if length else 0.0
     if peak > 0.95:
         mix *= 0.95 / peak  # keep the sum from clipping
+    return mix
+
+
+def mix_tracks(track_paths: list[Path], target: Path) -> None:
+    """Mix tracks into a 16 kHz mono WAV for Whisper (no FFmpeg needed)."""
+    from stt_engine import SAMPLE_RATE
+
+    mix = _mix(track_paths, SAMPLE_RATE)
     with wave.open(str(target), "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
         handle.setframerate(SAMPLE_RATE)
         handle.writeframes((mix * 32767).astype(np.int16).tobytes())
+
+
+def export_mp3(sources: list[Path], target: Path) -> None:
+    """Encode one or more sources (mixed) to a 48 kHz mono MP3 for sharing."""
+    import av
+
+    mix = _mix(sources, EXPORT_RATE)
+    partial = target.with_suffix(".part")
+    with av.open(str(partial), "w", format="mp3") as container:
+        stream = container.add_stream("libmp3lame", rate=EXPORT_RATE, layout="mono")
+        stream.bit_rate = EXPORT_BITRATE
+        frame_size = stream.codec_context.frame_size or 1152
+        for offset in range(0, len(mix), frame_size):
+            chunk = mix[offset : offset + frame_size]
+            frame = av.AudioFrame.from_ndarray(chunk.reshape(1, -1), format="fltp", layout="mono")
+            frame.sample_rate = EXPORT_RATE
+            frame.pts = offset
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    partial.replace(target)
 
 
 def repair_wav(path: Path) -> float:

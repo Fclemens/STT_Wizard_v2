@@ -61,7 +61,14 @@ Everything happens on one page per session:
 6. Export the corrected or original transcript as TXT, SRT, VTT or JSON.
 7. Run Analysis for a summary, key points, action items and open questions.
 
-Recordings are kept per session in `data/sessions/<id>/audio/rec-*/`: `mic.wav`, `system.wav` and the mixed `mix.wav`.
+Recordings are kept per session in `data/sessions/<id>/audio/rec-*/`: `mic.wav` and `system.wav` (16-bit WAV at the
+device rate, usually 48 kHz) and `mix.wav` (16 kHz, used for transcription). About 800 MB per hour with both sources.
+
+`Export MP3` on the audio bar saves a 48 kHz, 128 kbps MP3 of both sources mixed (about 60 MB per hour); with both
+sources recorded, `Mic only` / `System only` export a single source. Exports are cached next to the recording.
+
+Deleting a session deletes all its files, including recordings and exports. Starting a new recording or uploading
+a file in the same session replaces (deletes) the previous audio.
 
 ## Glossary
 

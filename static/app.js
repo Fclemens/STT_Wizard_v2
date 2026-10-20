@@ -135,6 +135,7 @@
       const mb = s.audio.size ? `${(s.audio.size / 1048576).toFixed(1)} MB` : "";
       const sources = s.audio.tracks ? Object.values(s.audio.tracks).map((t) => t.device).filter(Boolean).join(" + ") : "";
       $("audio-info").textContent = [s.audio.duration ? fmtTime(s.audio.duration) : "", mb, sources].filter(Boolean).join(" · ");
+      renderAudioExport(s.audio);
       const player = $("player");
       if (player.dataset.src !== s.audio.url + s.audio.file) {
         player.dataset.src = s.audio.url + s.audio.file;
@@ -142,6 +143,50 @@
       }
     }
     $("replace-audio").disabled = busy();
+  }
+
+  function renderAudioExport(audio) {
+    const container = $("audio-export");
+    const key = audio.file;
+    if (container.dataset.key === key) return; // keep "Preparing…" state across re-renders
+    container.dataset.key = key;
+    const tracks = Object.keys(audio.tracks || {});
+    const options = [{ track: "mix", label: "Export MP3" }];
+    if (tracks.length > 1) {
+      if (tracks.includes("mic")) options.push({ track: "mic", label: "Mic only" });
+      if (tracks.includes("system")) options.push({ track: "system", label: "System only" });
+    }
+    container.innerHTML = options
+      .map((o, i) => `<button type="button" class="btn ${i === 0 ? "btn-ghost" : "btn-ghost btn-sm"}" data-export-track="${o.track}">${o.label}</button>`)
+      .join("");
+  }
+
+  async function exportAudio(button) {
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = "Preparing…";
+    try {
+      const response = await fetch(`/api/sessions/${sid()}/audio/export?track=${button.dataset.exportTrack}`);
+      if (!response.ok) {
+        let detail = `Export failed (${response.status})`;
+        try { detail = (await response.json()).detail || detail; } catch { /* not JSON */ }
+        throw new Error(detail);
+      }
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename\*=utf-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/);
+      const name = match ? decodeURIComponent(match[1]) : "recording.mp3";
+      const url = URL.createObjectURL(await response.blob());
+      const link = Object.assign(document.createElement("a"), { href: url, download: name });
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = label;
+    }
   }
 
   // ── Recording ────────────────────────────────────────────────────────
@@ -734,6 +779,10 @@
     $("replace-audio").addEventListener("click", () => {
       state.replacing = true;
       renderInput();
+    });
+    $("audio-export").addEventListener("click", (e) => {
+      const button = e.target.closest("[data-export-track]");
+      if (button) exportAudio(button);
     });
     $("cancel-replace").addEventListener("click", () => {
       state.replacing = false;
