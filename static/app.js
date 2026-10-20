@@ -605,6 +605,7 @@
     $("run-analysis").disabled = busy();
     $("run-analysis").textContent = a ? "Run again" : "Run analysis";
     $("analysis-meta").textContent = a ? `${a.model}${a.mode === "local" ? " (no API key: basic local summary)" : ""}` : "";
+    $("copy-analysis").hidden = !a || s.status === "analyzing";
     if (s.status === "analyzing") {
       $("analysis-body").innerHTML = `<p class="placeholder">Summarising…</p>`;
       return;
@@ -617,6 +618,41 @@
       items && items.length ? `<div><h3>${title}</h3><ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>` : "";
     $("analysis-body").innerHTML = `<p class="summary">${esc(a.summary)}</p>
       <div class="analysis-grid">${list("Key points", a.key_points)}${list("Action items", a.action_items)}${list("Open questions", a.open_questions)}</div>`;
+  }
+
+  // Plain text with "- " bullets: pastes cleanly into email, Teams, Word.
+  function analysisText(a) {
+    const section = (title, items) => (items && items.length ? `\n\n${title}\n${items.map((i) => `- ${i}`).join("\n")}` : "");
+    return `${state.session.name}\n\nSummary\n${a.summary}` +
+      section("Key points", a.key_points) + section("Action items", a.action_items) + section("Open questions", a.open_questions) + "\n";
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for contexts without the async clipboard API.
+      const area = Object.assign(document.createElement("textarea"), { value: text });
+      area.style.cssText = "position:fixed;opacity:0";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      if (!ok) throw new Error("Could not access the clipboard.");
+    }
+  }
+
+  async function copyAnalysis() {
+    const a = state.session.analysis;
+    if (!a) return;
+    const label = $("copy-analysis").querySelector("span");
+    try {
+      await copyText(analysisText(a));
+      label.textContent = "Copied";
+      setTimeout(() => (label.textContent = "Copy"), 1500);
+    } catch (error) {
+      toast(error.message, "error");
+    }
   }
 
   // ── Render all ───────────────────────────────────────────────────────
@@ -887,6 +923,7 @@
     });
 
     $("export-version").addEventListener("change", renderExports);
+    $("copy-analysis").addEventListener("click", copyAnalysis);
     $("run-analysis").addEventListener("click", async () => {
       const session = await run(() => api(`/api/sessions/${sid()}/analysis`, { method: "POST" }));
       if (session) applySession(session);

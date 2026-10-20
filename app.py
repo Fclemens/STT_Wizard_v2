@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -36,6 +37,11 @@ from stt_engine import (
 load_env_file()
 
 templates = Jinja2Templates(directory=str(RESOURCE_DIR / "templates"))
+# Content hash of the static files, appended to their URLs: the desktop window keeps a
+# persistent cache, and this makes it fetch fresh CSS/JS whenever they change.
+ASSET_VERSION = hashlib.sha1(
+    b"".join((RESOURCE_DIR / "static" / name).read_bytes() for name in ("app.css", "app.js", "fonts/fonts.css"))
+).hexdigest()[:10]
 
 
 @asynccontextmanager
@@ -107,7 +113,11 @@ def session_page(request: Request, session_id: str) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "session.html",
-        {"session": session, "bootstrap_json": json.dumps(bootstrap, ensure_ascii=False).replace("</", "<\\/")},
+        {
+            "session": session,
+            "asset_version": ASSET_VERSION,
+            "bootstrap_json": json.dumps(bootstrap, ensure_ascii=False).replace("</", "<\\/"),
+        },
     )
 
 

@@ -383,3 +383,4 @@ dialog.settings .card-head h2 { margin-right: auto; }
   .lines { max-height: none; }
   .source-row { grid-template-columns: 1fr; gap: 6px; }
 }
+.card-actions { display: flex; gap: 6px; margin-left: auto; }

@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{{ session.name }} — STT Wizard</title>
-    <link rel="stylesheet" href="/static/fonts/fonts.css" />
-    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="/static/fonts/fonts.css?v={{ asset_version }}" />
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}" />
   </head>
   <body>
     <div class="shell">
@@ -199,7 +199,13 @@
           <div class="card-head">
             <h2>Analysis</h2>
             <span class="muted small" id="analysis-meta"></span>
-            <button type="button" class="btn btn-ghost btn-sm" id="run-analysis">Run analysis</button>
+            <div class="card-actions">
+              <button type="button" class="btn btn-ghost btn-sm" id="copy-analysis" hidden>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="5" y="5" width="9" height="9" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" stroke="currentColor" stroke-width="1.5"/></svg>
+                <span>Copy</span>
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm" id="run-analysis">Run analysis</button>
+            </div>
           </div>
           <div id="analysis-body"></div>
         </section>
@@ -241,6 +247,6 @@
     </dialog>
 
     <script id="bootstrap" type="application/json">{{ bootstrap_json|safe }}</script>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v={{ asset_version }}"></script>
   </body>
 </html>

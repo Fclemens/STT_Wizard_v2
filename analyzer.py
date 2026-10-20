@@ -61,7 +61,7 @@ def analyze_transcript(text: str) -> dict[str, Any]:
                 }
             },
         },
-        timeout=60,
+        timeout=600,  # long meetings: the whole transcript goes in one call
     )
     response.raise_for_status()
     payload = response.json()
