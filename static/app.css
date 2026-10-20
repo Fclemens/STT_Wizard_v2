@@ -320,3 +320,35 @@ dialog.settings .icon-btn:hover { color: var(--text); border-color: var(--line);
   .lines { max-height: none; }
 }
 dialog.settings .card-head h2 { margin-right: auto; }
+
+/* Recording ------------------------------------------------------------- */
+.input-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.segmented { display: inline-flex; padding: 3px; border-radius: 10px; background: rgba(50, 38, 20, 0.07); }
+.segmented button {
+  padding: 6px 14px; border: none; border-radius: 8px; background: transparent;
+  font: 500 13px "Space Grotesk", sans-serif; color: var(--muted); cursor: pointer;
+}
+.segmented button.is-active { background: var(--panel-strong); color: var(--text); box-shadow: 0 1px 3px rgba(44, 31, 18, 0.12); }
+.source-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 160px; gap: 12px; align-items: center; margin-bottom: 10px; }
+.source-toggle { font-weight: 500; }
+.source-hint { margin: 2px 0 12px; }
+.meter { height: 8px; border-radius: 999px; background: rgba(50, 38, 20, 0.08); overflow: hidden; }
+.meter-fill { height: 100%; width: 0; border-radius: 999px; background: var(--accent); transition: width 0.08s linear; }
+.meter-fill.is-hot { background: var(--error); }
+.record-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.btn-record { background: var(--error); border-color: var(--error); color: white; padding: 10px 18px; font-size: 14px; }
+.btn-record:hover:not(:disabled) { background: #9a3622; border-color: #9a3622; color: white; }
+.btn-record .rec-dot { background: white; animation: none; }
+.rec-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--error); animation: pulse 1.2s ease-in-out infinite; }
+.record-controls.is-live { padding: 10px 12px; border-radius: var(--radius); background: var(--error-bg); border: 1px solid var(--error-border); }
+.record-controls.is-paused { background: rgba(50, 38, 20, 0.05); border-color: var(--line); }
+.record-controls.is-paused .rec-dot { animation: none; background: var(--muted); }
+.rec-indicator { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--error); }
+.record-controls.is-paused .rec-indicator { color: var(--muted); }
+.rec-timer { font: 500 18px var(--mono); margin-right: auto; }
+.speaker-me { color: var(--accent-dark); }
+.speaker-others { color: var(--blue); }
+.line { grid-template-columns: 62px auto 1fr; }
+@media (max-width: 760px) {
+  .source-row { grid-template-columns: 1fr; gap: 6px; }
+}

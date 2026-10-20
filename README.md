@@ -20,6 +20,8 @@ On first run it:
 
 Dependency installation can take several minutes because Whisper and Torch are large.
 
+`START_STT_WIZARD.bat` also installs any new dependencies after an update, so run it once after pulling a new version.
+
 For later runs, double-click:
 
 ```text
@@ -41,14 +43,25 @@ Audio transcription is local. OpenAI is only called for Review, Analysis and key
 
 Everything happens on one page per session:
 
-1. Click `+ New session` and drop an audio file (or a `.txt` transcript to go straight to Review).
-2. Transcription starts right away with your default settings. Lines stream in as Whisper works.
-   Open `Transcription settings` to pick another model or language, turn on translation, or add a session glossary.
-3. When the transcript is done, Review runs automatically (if an OpenAI key is set and auto-review is on).
+1. Click `+ New session`.
+2. **Record** (default): tick `Microphone` and/or `System audio`, pick the devices, optionally `Check levels`, then `Start recording`.
+   - System audio captures what plays on the chosen output (the other people in a Teams/Zoom call, a video…).
+   - With both on, each transcript line is labelled **Me** (microphone) or **Others** (system audio).
+   - Pause/resume any time. `Stop & transcribe` mixes the tracks and starts transcription automatically.
+   - Recording runs in the app, not the browser tab: closing or refreshing the page does not stop it.
+     If the app itself closes mid-recording, the audio captured so far is recovered on next start.
+   - Let everyone know they are being recorded.
+
+   Or **Upload a file**: drop an audio file (or a `.txt` transcript to go straight to Review).
+3. Lines stream in as Whisper works. Open `Transcription settings` to pick another model or language,
+   turn on translation, or edit the session glossary, then `Transcribe again`.
+4. When the transcript is done, Review runs automatically (if an OpenAI key is set and auto-review is on).
    Suspicious words are highlighted in the transcript; apply, edit or dismiss each suggestion.
-4. Click a timestamp to play the audio from that line; click any line to edit it.
-5. Export the corrected or original transcript as TXT, SRT, VTT or JSON.
-6. Run Analysis for a summary, key points, action items and open questions.
+5. Click a timestamp to play the audio from that line; click any line to edit it.
+6. Export the corrected or original transcript as TXT, SRT, VTT or JSON.
+7. Run Analysis for a summary, key points, action items and open questions.
+
+Recordings are kept per session in `data/sessions/<id>/audio/rec-*/`: `mic.wav`, `system.wav` and the mixed `mix.wav`.
 
 ## Glossary
 

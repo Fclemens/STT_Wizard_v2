@@ -29,6 +29,15 @@ if not exist "%PYTHON_EXE%" (
     pause
     exit /b 1
   )
+) else (
+  rem Existing environment: install anything new in requirements.txt. Fast when nothing changed.
+  echo Checking dependencies...
+  "%PYTHON_EXE%" -m pip install -q -r requirements.txt
+  if errorlevel 1 (
+    echo Dependency update failed.
+    pause
+    exit /b 1
+  )
 )
 
 echo Starting STT Wizard server...

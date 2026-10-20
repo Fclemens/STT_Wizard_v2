@@ -18,7 +18,8 @@ import session_store as store
 from analyzer import analyze_transcript
 from reviewer import review_segments
 from settings_store import load_settings, openai_ready
-from stt_engine import transcribe
+from recorder import label_speakers
+from stt_engine import SAMPLE_RATE, load_audio, transcribe
 
 STAGE_MESSAGES = {
     "queued": "Waiting for the previous transcription to finish.",
@@ -77,6 +78,7 @@ def start_transcription(session_id: str, options: dict[str, Any]) -> None:
             raise RuntimeError("Add audio before transcribing.")
         live["status"] = "transcribing"
         live["error"] = None
+        live["notice"] = None
         live["job"] = job
         live["transcript"] = {
             "source": "whisper",
@@ -159,7 +161,13 @@ def _run_transcription(session_id: str, job_id: str, options: dict[str, Any]) ->
 
 
 def _finish_transcription(session_id: str, meta: dict[str, Any]) -> None:
+    speakers = _speaker_labels(session_id)
     with store.edit(session_id) as live:
+        if speakers:
+            for segment in live["transcript"]["segments"]:
+                if segment["id"] in speakers:
+                    segment["speaker"] = speakers[segment["id"]]
+            live["transcript"]["speakers"] = True
         transcript = live["transcript"]
         transcript["completed_at"] = store.now_iso()
         transcript["stopped"] = bool(meta.get("stopped"))
@@ -180,6 +188,37 @@ def _finish_transcription(session_id: str, meta: dict[str, Any]) -> None:
             start_review(session_id, chain_analysis=bool(settings.get("auto_analysis")))
         elif settings.get("auto_analysis"):
             start_analysis(session_id)
+
+
+def _speaker_labels(session_id: str) -> dict[str, str]:
+    """Me/Others per line, when the session was recorded with both sources."""
+    session = store.get_session(session_id)
+    tracks = ((session or {}).get("audio") or {}).get("tracks") or {}
+    segments = ((session or {}).get("transcript") or {}).get("segments") or []
+    if not ("mic" in tracks and "system" in tracks and segments):
+        return {}
+    try:
+        folder = store.audio_dir(session_id)
+        mic = load_audio(folder / tracks["mic"]["file"])
+        system = load_audio(folder / tracks["system"]["file"])
+        copies = [dict(segment) for segment in segments]
+        label_speakers(copies, mic, system, SAMPLE_RATE)
+        return {seg["id"]: seg["speaker"] for seg in copies if seg.get("speaker")}
+    except Exception:  # noqa: BLE001 - labels are a nice-to-have
+        traceback.print_exc()
+        return {}
+
+
+def default_transcribe_options(session: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    settings = load_settings()
+    overrides = overrides or {}
+    return {
+        "model": str(overrides.get("model") or settings.get("default_model") or "turbo"),
+        "language": str(overrides.get("language", settings.get("default_language", "")) or "").strip().lower(),
+        "task": "translate" if overrides.get("task") == "translate" else "transcribe",
+        "accurate": bool(overrides.get("accurate", settings.get("accurate_decoding", True))),
+        "glossary": effective_glossary(session),
+    }
 
 
 def stop(session_id: str) -> None:

@@ -13,6 +13,10 @@
     models: boot.models,
     reviewFilter: "pending",
     activeLine: null,
+    inputMode: "record",
+    replacing: false,
+    monitoring: false,
+    devices: { available: true, error: null, mics: [], systems: [] },
   };
   const $ = (id) => document.getElementById(id);
   const sid = () => state.session.id;
@@ -61,12 +65,12 @@
     try { return await action(); } catch (error) { toast(error.message, "error"); return null; }
   }
 
-  const busy = () => ["transcribing", "reviewing", "analyzing"].includes(state.session.status);
+  const busy = () => ["recording", "transcribing", "reviewing", "analyzing"].includes(state.session.status);
   const segments = () => (state.session.transcript && state.session.transcript.segments) || [];
   const suggestions = () => (state.session.review && state.session.review.suggestions) || [];
 
   // ── Sidebar ──────────────────────────────────────────────────────────
-  const STATUS_LABEL = { idle: "", transcribing: "Transcribing", reviewing: "Reviewing", analyzing: "Analysing", ready: "", failed: "Failed" };
+  const STATUS_LABEL = { idle: "", recording: "Recording", transcribing: "Transcribing", reviewing: "Reviewing", analyzing: "Analysing", ready: "", failed: "Failed" };
 
   function renderSidebar() {
     const current = state.sessions.find((item) => item.id === sid());
@@ -98,7 +102,7 @@
       review: Boolean(s.review),
       analysis: Boolean(s.analysis),
     };
-    const activeStep = { transcribing: "transcript", reviewing: "review", analyzing: "analysis" }[s.status];
+    const activeStep = { recording: "audio", transcribing: "transcript", reviewing: "review", analyzing: "analysis" }[s.status];
     document.querySelectorAll("#stepper li").forEach((li) => {
       li.classList.toggle("is-done", done[li.dataset.step]);
       li.classList.toggle("is-active", li.dataset.step === activeStep);
@@ -107,20 +111,30 @@
     const errorBanner = $("error-banner");
     errorBanner.hidden = !(s.status === "failed" && s.error);
     errorBanner.textContent = s.error || "";
+    $("notice-banner").hidden = !s.notice;
+    $("notice-banner").textContent = s.notice || "";
   }
 
   // ── Input card ───────────────────────────────────────────────────────
   function renderInput() {
     const s = state.session;
     const hasAudio = Boolean(s.audio);
-    const imported = s.transcript && s.transcript.source === "import";
-    $("dropzone").hidden = hasAudio || imported;
-    $("input-card").hidden = imported;
-    $("audio-bar").hidden = !hasAudio;
+    const imported = Boolean(s.transcript && s.transcript.source === "import");
+    const recording = s.status === "recording";
+    const choosing = recording || state.replacing || (!hasAudio && !imported);
+    $("input-card").hidden = imported && !choosing;
+    $("input-head").hidden = recording;
+    $("cancel-replace").hidden = !(state.replacing && (hasAudio || imported));
+    document.querySelectorAll("#input-head [data-mode]").forEach((b) => b.classList.toggle("is-active", b.dataset.mode === state.inputMode));
+    $("record-panel").hidden = !choosing || (state.inputMode !== "record" && !recording);
+    $("upload-panel").hidden = !choosing || recording || state.inputMode !== "upload";
+    $("audio-bar").hidden = !hasAudio || choosing;
+    renderRecordControls();
     if (hasAudio) {
       $("audio-name").textContent = s.audio.original_name;
       const mb = s.audio.size ? `${(s.audio.size / 1048576).toFixed(1)} MB` : "";
-      $("audio-info").textContent = [s.audio.duration ? fmtTime(s.audio.duration) : "", mb].filter(Boolean).join(" · ");
+      const sources = s.audio.tracks ? Object.values(s.audio.tracks).map((t) => t.device).filter(Boolean).join(" + ") : "";
+      $("audio-info").textContent = [s.audio.duration ? fmtTime(s.audio.duration) : "", mb, sources].filter(Boolean).join(" · ");
       const player = $("player");
       if (player.dataset.src !== s.audio.url + s.audio.file) {
         player.dataset.src = s.audio.url + s.audio.file;
@@ -128,6 +142,113 @@
       }
     }
     $("replace-audio").disabled = busy();
+  }
+
+  // ── Recording ────────────────────────────────────────────────────────
+  function renderRecordControls() {
+    const s = state.session;
+    const job = s.job || {};
+    const recording = s.status === "recording";
+    $("record-idle").hidden = recording;
+    $("record-live").hidden = !recording;
+    $("use-mic").disabled = recording || !state.devices.mics.length;
+    $("use-system").disabled = recording || !state.devices.systems.length;
+    $("mic-select").disabled = recording || !$("use-mic").checked;
+    $("system-select").disabled = recording || !$("use-system").checked;
+    const anySource = $("use-mic").checked || $("use-system").checked;
+    $("record-btn").disabled = busy() || !state.devices.available || !anySource;
+    $("check-levels").disabled = busy() || !state.devices.available || !anySource;
+    $("check-levels").textContent = state.monitoring ? "Stop level check" : "Check levels";
+    if (recording) {
+      const paused = job.stage === "paused";
+      const saving = job.stage === "saving";
+      $("rec-state").textContent = saving ? "Saving…" : paused ? "Paused" : "Recording";
+      $("record-live").classList.toggle("is-paused", paused || saving);
+      $("pause-btn").textContent = paused ? "Resume" : "Pause";
+      ["pause-btn", "stop-btn", "stop-only-btn"].forEach((id) => ($(id).disabled = saving));
+    }
+  }
+
+  function levelPercent(level) {
+    if (!level || level < 0.001) return 0;
+    return Math.min(100, Math.max(0, ((20 * Math.log10(level) + 60) / 60) * 100));
+  }
+
+  function updateMeters(data) {
+    for (const name of ["mic", "system"]) {
+      const level = (data.levels || {})[name] || 0;
+      const fill = $(`meter-${name}`);
+      fill.style.width = `${levelPercent(level)}%`;
+      fill.classList.toggle("is-hot", level > 0.9);
+    }
+    if (!data.monitor && !data.ended) $("rec-timer").textContent = fmtTime(data.elapsed);
+    if (data.ended && state.monitoring) {
+      state.monitoring = false;
+      renderRecordControls();
+    }
+  }
+
+  function fillDeviceSelect(select, devices, preferredName) {
+    const preferred = devices.find((d) => d.name === preferredName) || devices.find((d) => d.default) || devices[0];
+    select.innerHTML = devices
+      .map((d) => `<option value="${d.id}" data-name="${esc(d.name)}" ${preferred && d.id === preferred.id ? "selected" : ""}>${esc(d.name)}${d.default ? " (default)" : ""}</option>`)
+      .join("");
+  }
+
+  async function loadDevices() {
+    let devices = null;
+    try { devices = await api("/api/audio/devices"); } catch (error) { devices = { available: false, error: error.message }; }
+    state.devices = { mics: [], systems: [], ...devices };
+    const { mics, systems } = state.devices;
+    fillDeviceSelect($("mic-select"), mics, state.settings.mic_device);
+    fillDeviceSelect($("system-select"), systems, state.settings.system_device);
+    $("use-mic").checked = state.settings.record_mic !== false && mics.length > 0;
+    $("use-system").checked = state.settings.record_system !== false && systems.length > 0;
+    const problem = !state.devices.available ? state.devices.error : !mics.length && !systems.length ? "No audio input devices were found." : "";
+    $("devices-error").hidden = !problem;
+    $("devices-error").textContent = problem || "";
+    renderRecordControls();
+  }
+
+  function selectedSources() {
+    const pick = (use, select) => {
+      const option = $(select).selectedOptions[0];
+      return $(use).checked && option ? { id: Number(option.value), name: option.dataset.name } : null;
+    };
+    const mic = pick("use-mic", "mic-select");
+    const system = pick("use-system", "system-select");
+    return { mic: mic && mic.id, system: system && system.id, mic_name: mic ? mic.name : "", system_name: system ? system.name : "" };
+  }
+
+  async function startRecording() {
+    const s = state.session;
+    if ((s.audio || s.transcript) && !confirm("A new recording replaces this session's audio, transcript and review. Continue?")) return;
+    const sources = selectedSources();
+    const session = await run(() => api(`/api/sessions/${sid()}/recording/start`, { method: "POST", json: sources }));
+    if (!session) return;
+    state.monitoring = false;
+    state.replacing = false;
+    state.settings.mic_device = sources.mic_name || state.settings.mic_device;
+    state.settings.system_device = sources.system_name || state.settings.system_device;
+    $("rec-timer").textContent = "0:00";
+    applySession(session);
+  }
+
+  async function recordingAction(action, json = {}) {
+    const session = await run(() => api(`/api/sessions/${sid()}/recording/${action}`, { method: "POST", json }));
+    if (session) applySession(session);
+  }
+
+  async function toggleLevelCheck() {
+    if (state.monitoring) {
+      await run(() => api(`/api/sessions/${sid()}/monitor`, { method: "POST", json: { stop: true } }));
+      state.monitoring = false;
+      updateMeters({ levels: {}, monitor: true });
+    } else {
+      const ok = await run(() => api(`/api/sessions/${sid()}/monitor`, { method: "POST", json: selectedSources() }));
+      state.monitoring = Boolean(ok);
+    }
+    renderRecordControls();
   }
 
   // ── Transcription settings ───────────────────────────────────────────
@@ -171,13 +292,13 @@
   }
 
   // ── Job card ─────────────────────────────────────────────────────────
-  const JOB_TITLES = { transcribe: "Transcribing", review: "Reviewing", analysis: "Analysing" };
+  const JOB_TITLES = { record: "Recording", transcribe: "Transcribing", review: "Reviewing", analysis: "Analysing" };
 
   function renderJob() {
     const job = state.session.job;
     const card = $("job-card");
-    card.hidden = !job;
-    if (!job) return;
+    card.hidden = !job || (job.kind === "record" && job.stage !== "saving");
+    if (card.hidden) return;
     $("job-title").textContent = JOB_TITLES[job.kind] || "Working";
     $("job-message").textContent = job.message || "";
     const indeterminate = job.kind !== "transcribe" && !job.progress;
@@ -224,9 +345,9 @@
   function lineHtml(seg, pending) {
     const timed = seg.start !== null && seg.start !== undefined;
     const edited = seg.text !== seg.original_text;
-    return `<div class="line ${edited ? "is-edited" : ""}" id="line-${seg.id}" data-id="${seg.id}">
+    return `<div class="line ${edited ? "is-edited" : ""}" id="line-${seg.id}" data-id="${seg.id}" data-speaker="${esc(seg.speaker || "")}">
       ${timed ? `<button type="button" class="ts" data-seek="${seg.start}" title="Play from here">${fmtTime(seg.start)}</button>` : `<span class="ts ts-static">${seg.id.replace(/^s0*/, "#")}</span>`}
-      ${seg.speaker ? `<span class="speaker">${esc(seg.speaker)}</span>` : ""}
+      ${seg.speaker ? `<span class="speaker speaker-${seg.speaker === "Me" ? "me" : "others"}">${esc(seg.speaker)}</span>` : ""}
       <div class="text" contenteditable="plaintext-only" spellcheck="true">${highlight(seg.text, pending.get(seg.id))}</div>
     </div>`;
   }
@@ -263,6 +384,10 @@
       }
       const textEl = el.querySelector(".text");
       if (document.activeElement === textEl) continue; // never clobber the line being edited
+      if ((el.dataset.speaker || "") !== (seg.speaker || "")) {
+        el.outerHTML = lineHtml(seg, pending);
+        continue;
+      }
       const html = highlight(seg.text, pending.get(seg.id));
       if (textEl.innerHTML !== html) textEl.innerHTML = html;
       el.classList.toggle("is-edited", seg.text !== seg.original_text);
@@ -439,6 +564,7 @@
   function connect() {
     const source = new EventSource(`/api/sessions/${sid()}/events`);
     source.addEventListener("session", (e) => applySession(JSON.parse(e.data)));
+    source.addEventListener("levels", (e) => updateMeters(JSON.parse(e.data)));
     source.addEventListener("job", (e) => {
       state.session.job = JSON.parse(e.data);
       renderJob();
@@ -464,11 +590,13 @@
   // ── Actions ──────────────────────────────────────────────────────────
   async function uploadFile(file) {
     if (!file) return;
+    if (state.session.transcript && !confirm("This file replaces the session's audio, transcript and review. Continue?")) return;
     const form = new FormData();
     form.append("file", file);
     toast(`Uploading ${file.name}…`);
     const session = await run(() => api(`/api/sessions/${sid()}/upload`, { method: "POST", body: form }));
     if (!session) return;
+    state.replacing = false;
     applySession(session);
     if (session.audio) startTranscription();
     else toast("Transcript imported. You can review it now.");
@@ -566,9 +694,27 @@
     dz.addEventListener("drop", (e) => { e.preventDefault(); dz.classList.remove("is-over"); uploadFile(e.dataTransfer.files[0]); });
     $("file-input").addEventListener("change", (e) => { uploadFile(e.target.files[0]); e.target.value = ""; });
     $("replace-audio").addEventListener("click", () => {
-      if (state.session.transcript && !confirm("Replacing the audio clears the current transcript and review. Continue?")) return;
-      $("file-input").click();
+      state.replacing = true;
+      renderInput();
     });
+    $("cancel-replace").addEventListener("click", () => {
+      state.replacing = false;
+      if (state.monitoring) toggleLevelCheck();
+      renderInput();
+    });
+    document.querySelectorAll("#input-head [data-mode]").forEach((button) =>
+      button.addEventListener("click", () => {
+        state.inputMode = button.dataset.mode;
+        if (state.inputMode !== "record" && state.monitoring) toggleLevelCheck();
+        renderInput();
+      })
+    );
+    ["use-mic", "use-system"].forEach((id) => $(id).addEventListener("change", renderRecordControls));
+    $("record-btn").addEventListener("click", startRecording);
+    $("check-levels").addEventListener("click", toggleLevelCheck);
+    $("pause-btn").addEventListener("click", () => recordingAction(state.session.job && state.session.job.stage === "paused" ? "resume" : "pause"));
+    $("stop-btn").addEventListener("click", () => recordingAction("stop"));
+    $("stop-only-btn").addEventListener("click", () => recordingAction("stop", { transcribe: false }));
 
     $("new-session").addEventListener("click", async () => {
       const session = await run(() => api("/api/sessions", { method: "POST", json: {} }));
@@ -688,4 +834,5 @@
   initTranscribeOptions();
   renderAll({ fullTranscript: true });
   connect();
+  loadDevices();
 })();

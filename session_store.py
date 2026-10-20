@@ -28,7 +28,7 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 SCHEMA_VERSION = 1
 
 # Pipeline states. "busy" states mean a background job owns the session.
-BUSY_STATUSES = {"transcribing", "reviewing", "analyzing"}
+BUSY_STATUSES = {"recording", "transcribing", "reviewing", "analyzing"}
 
 _cache: dict[str, dict[str, Any]] = {}
 _locks: dict[str, threading.RLock] = {}
@@ -96,6 +96,8 @@ def new_session_payload(name: str) -> dict[str, Any]:
         "status": "idle",
         "job": None,
         "error": None,
+        "notice": None,
+        "recording": None,
         "glossary": "",
         "audio": None,
         "transcript": None,
@@ -191,8 +193,8 @@ def recover_interrupted_sessions() -> None:
     for candidate in SESSIONS_DIR.glob("*/session.json"):
         session_id = candidate.parent.name
         session = get_session(session_id)
-        if not session or session.get("status") not in BUSY_STATUSES:
-            continue
+        if not session or session.get("status") not in BUSY_STATUSES - {"recording"}:
+            continue  # recordings are salvaged by recording.recover_interrupted()
         with edit(session_id) as live:
             step = {"transcribing": "Transcription", "reviewing": "Review", "analyzing": "Analysis"}[live["status"]]
             live["job"] = None

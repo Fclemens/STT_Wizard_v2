@@ -5,3 +5,4 @@ python-multipart==0.0.20
 openai-whisper==20250625
 torch>=2.2.0
 requests>=2.32.0
+PyAudioWPatch>=0.2.12.7; sys_platform == "win32"

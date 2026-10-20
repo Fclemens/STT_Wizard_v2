@@ -50,24 +50,64 @@
         </header>
 
         <div class="banner banner-error" id="error-banner" hidden></div>
+        <div class="banner banner-info" id="notice-banner" hidden></div>
         <div class="banner banner-info" id="toast" hidden></div>
 
         <!-- Capture / input -->
         <section class="card" id="input-card">
-          <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Add audio or transcript file">
-            <input type="file" id="file-input" hidden />
-            <svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l4.5 4.5-1.4 1.4-2.1-2.1V15h-2V7.8L8.9 9.9 7.5 8.5 12 4zm-6 12h12v2H6v-2z" fill="currentColor"/></svg>
-            <strong>Drop an audio file here, or click to browse</strong>
-            <span class="muted" id="dropzone-formats"></span>
-            <span class="muted small">A .txt transcript also works: it skips straight to Review.</span>
+          <div class="input-head" id="input-head">
+            <div class="segmented" role="tablist" aria-label="Audio source">
+              <button type="button" role="tab" data-mode="record" class="is-active">Record</button>
+              <button type="button" role="tab" data-mode="upload">Upload a file</button>
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" id="cancel-replace" hidden>Cancel</button>
           </div>
+
+          <div id="record-panel">
+            <div class="source-row">
+              <label class="check source-toggle"><input type="checkbox" id="use-mic" /> Microphone</label>
+              <select id="mic-select" aria-label="Microphone device"></select>
+              <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-mic"></div></div>
+            </div>
+            <div class="source-row">
+              <label class="check source-toggle"><input type="checkbox" id="use-system" /> System audio</label>
+              <select id="system-select" aria-label="Output device to capture"></select>
+              <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-system"></div></div>
+            </div>
+            <p class="muted small source-hint">System audio records what plays on that output: the other people in a Teams/Zoom call, a video, etc. With both on, lines are labelled <b>Me</b> / <b>Others</b>.</p>
+            <div class="banner banner-warn small" id="devices-error" hidden></div>
+
+            <div class="record-controls" id="record-idle">
+              <button type="button" class="btn btn-record" id="record-btn"><span class="rec-dot"></span> Start recording</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="check-levels">Check levels</button>
+              <span class="muted small">Let everyone know they are being recorded.</span>
+            </div>
+            <div class="record-controls is-live" id="record-live" hidden>
+              <span class="rec-indicator"><span class="rec-dot"></span> <span id="rec-state">Recording</span></span>
+              <span class="rec-timer" id="rec-timer">0:00</span>
+              <button type="button" class="btn btn-ghost" id="pause-btn">Pause</button>
+              <button type="button" class="btn btn-primary" id="stop-btn">Stop &amp; transcribe</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="stop-only-btn">Stop without transcribing</button>
+            </div>
+          </div>
+
+          <div id="upload-panel" hidden>
+            <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Add audio or transcript file">
+              <input type="file" id="file-input" hidden />
+              <svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l4.5 4.5-1.4 1.4-2.1-2.1V15h-2V7.8L8.9 9.9 7.5 8.5 12 4zm-6 12h12v2H6v-2z" fill="currentColor"/></svg>
+              <strong>Drop an audio file here, or click to browse</strong>
+              <span class="muted" id="dropzone-formats"></span>
+              <span class="muted small">A .txt transcript also works: it skips straight to Review.</span>
+            </div>
+          </div>
+
           <div class="audio-bar" id="audio-bar" hidden>
             <div class="audio-meta">
               <span class="audio-name" id="audio-name"></span>
               <span class="muted small" id="audio-info"></span>
             </div>
             <audio id="player" controls preload="metadata"></audio>
-            <button type="button" class="btn btn-ghost btn-sm" id="replace-audio">Replace</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="replace-audio">New recording or file</button>
           </div>
         </section>
 

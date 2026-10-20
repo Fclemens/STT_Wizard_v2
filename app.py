@@ -17,7 +17,9 @@ from fastapi.templating import Jinja2Templates
 
 import events
 import pipeline
+import recording
 import session_store as store
+from recorder import RecorderError, list_devices
 from reviewer import apply_to_text
 from settings_store import DEFAULT_LLM_MODEL, load_env_file, load_settings, openai_ready, save_settings, update_env_key
 from stt_engine import (
@@ -38,9 +40,11 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    recording.recover_interrupted()
     store.recover_interrupted_sessions()
     pipeline.start_workers()
     yield
+    recording.stop_monitor()
 
 
 app = FastAPI(title="STT Wizard", version="0.3.0", lifespan=lifespan)
@@ -143,6 +147,7 @@ def api_delete_session(session_id: str) -> dict[str, Any]:
     session = require_session(session_id)
     if session.get("status") == "transcribing":
         pipeline.stop(session_id)
+    recording.discard(session_id)
     store.delete_session(session_id)
     return {"ok": True}
 
@@ -193,7 +198,7 @@ def api_upload(session_id: str, file: UploadFile = File(...)) -> JSONResponse:
     with (folder / stored_name).open("wb") as target:
         shutil.copyfileobj(file.file, target, length=1024 * 1024)
 
-    previous = (session.get("audio") or {}).get("file")
+    previous = session.get("audio")
     with store.edit(session_id) as live:
         live["audio"] = {
             "file": stored_name,
@@ -208,10 +213,10 @@ def api_upload(session_id: str, file: UploadFile = File(...)) -> JSONResponse:
         live["analysis"] = None
         live["status"] = "idle"
         live["error"] = None
+        live["notice"] = None
         if not live.get("user_renamed"):
             live["name"] = name_from_file(original_name)
-    if previous and previous != stored_name:
-        (folder / previous).unlink(missing_ok=True)
+    recording.remove_audio(session_id, previous, keep=stored_name)
     return session_response(session_id)
 
 
@@ -224,8 +229,10 @@ def import_transcript(session_id: str, original_name: str, file: UploadFile) -> 
         {"id": f"s{index:05}", "start": None, "end": None, "text": line, "original_text": line, "speaker": None}
         for index, line in enumerate(lines, start=1)
     ]
+    previous = (store.get_session(session_id) or {}).get("audio")
     with store.edit(session_id) as live:
         live["audio"] = None
+        live["notice"] = None
         live["transcript"] = {
             "source": "import",
             "model": "Imported text",
@@ -242,6 +249,7 @@ def import_transcript(session_id: str, original_name: str, file: UploadFile) -> 
         live["error"] = None
         if not live.get("user_renamed"):
             live["name"] = name_from_file(original_name)
+    recording.remove_audio(session_id, previous)
     return session_response(session_id)
 
 
@@ -257,6 +265,64 @@ def api_audio(session_id: str) -> FileResponse:
     return FileResponse(path, filename=audio.get("original_name") or path.name)
 
 
+# ── Recording ──────────────────────────────────────────────────────────────
+
+
+def _device_ids(payload: dict[str, Any]) -> tuple[int | None, int | None]:
+    def pick(key: str) -> int | None:
+        value = payload.get(key)
+        return None if value in (None, "", False) else int(value)
+
+    return pick("mic"), pick("system")
+
+
+@app.get("/api/audio/devices")
+def api_devices() -> dict[str, Any]:
+    try:
+        return list_devices()
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "error": f"Could not list audio devices: {exc}", "mics": [], "systems": []}
+
+
+@app.post("/api/sessions/{session_id}/monitor")
+def api_monitor(session_id: str, payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    require_session(session_id)
+    if payload.get("stop"):
+        recording.stop_monitor()
+        return {"ok": True}
+    try:
+        recording.start_monitor(session_id, *_device_ids(payload))
+    except RecorderError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True, "seconds": recording.MONITOR_SECONDS}
+
+
+@app.post("/api/sessions/{session_id}/recording/{action}")
+def api_recording(session_id: str, action: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    require_session(session_id)
+    try:
+        if action == "start":
+            mic, system = _device_ids(payload)
+            recording.start(session_id, mic, system)
+            settings = load_settings()
+            settings.update(
+                record_mic=mic is not None,
+                record_system=system is not None,
+                mic_device=str(payload.get("mic_name") or settings.get("mic_device", "")),
+                system_device=str(payload.get("system_name") or settings.get("system_device", "")),
+            )
+            save_settings(settings)
+        elif action in ("pause", "resume"):
+            recording.set_paused(session_id, action == "pause")
+        elif action == "stop":
+            recording.stop(session_id, transcribe=payload.get("transcribe", True) is not False)
+        else:
+            raise HTTPException(status_code=404, detail="Unknown recording action.")
+    except RecorderError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(store.public_view(require_session(session_id)))
+
+
 # ── Pipeline actions ───────────────────────────────────────────────────────
 
 
@@ -264,18 +330,9 @@ def api_audio(session_id: str) -> FileResponse:
 def api_transcribe(session_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
     session = require_session(session_id)
     require_idle(session)
-    settings = load_settings()
-    model = str(payload.get("model") or settings.get("default_model") or "turbo")
-    if model not in MODEL_OPTIONS:
+    options = pipeline.default_transcribe_options(session, payload)
+    if options["model"] not in MODEL_OPTIONS:
         raise HTTPException(status_code=400, detail="Unknown model.")
-    task = "translate" if payload.get("task") == "translate" else "transcribe"
-    options = {
-        "model": model,
-        "language": str(payload.get("language") or "").strip().lower(),
-        "task": task,
-        "accurate": bool(payload.get("accurate", settings.get("accurate_decoding", True))),
-        "glossary": pipeline.effective_glossary(session),
-    }
     try:
         pipeline.start_transcription(session_id, options)
     except RuntimeError as exc:
