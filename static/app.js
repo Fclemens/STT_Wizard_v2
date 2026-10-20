@@ -123,7 +123,7 @@
     const recording = s.status === "recording";
     const choosing = recording || state.replacing || (!hasAudio && !imported);
     $("input-card").hidden = imported && !choosing;
-    $("input-head").hidden = recording;
+    $("input-head").hidden = recording || !choosing;
     $("cancel-replace").hidden = !(state.replacing && (hasAudio || imported));
     document.querySelectorAll("#input-head [data-mode]").forEach((b) => b.classList.toggle("is-active", b.dataset.mode === state.inputMode));
     $("record-panel").hidden = !choosing || (state.inputMode !== "record" && !recording);
@@ -159,6 +159,7 @@
     $("record-btn").disabled = busy() || !state.devices.available || !anySource;
     $("check-levels").disabled = busy() || !state.devices.available || !anySource;
     $("check-levels").textContent = state.monitoring ? "Stop level check" : "Check levels";
+    if (!recording && !state.monitoring) resetMeters();
     if (recording) {
       const paused = job.stage === "paused";
       const saving = job.stage === "saving";
@@ -169,18 +170,55 @@
     }
   }
 
-  function levelPercent(level) {
-    if (!level || level < 0.001) return 0;
-    return Math.min(100, Math.max(0, ((20 * Math.log10(level) + 60) / 60) * 100));
+  // Segmented meters: 24 segments over -60..0 dBFS, amber from -18, red from -6.
+  const METER_SEGMENTS = 24;
+  const METER_FLOOR_DB = -60;
+  const peaks = {};
+
+  function buildMeters() {
+    for (const name of ["mic", "system"]) {
+      const meter = $(`meter-${name}`);
+      meter.innerHTML = Array.from({ length: METER_SEGMENTS }, (_, i) => {
+        const db = METER_FLOOR_DB + ((i + 1) * -METER_FLOOR_DB) / METER_SEGMENTS;
+        return `<span class="seg${db > -6 ? " hot" : db > -18 ? " warn" : ""}"></span>`;
+      }).join("");
+      peaks[name] = { index: -1, until: 0 };
+    }
+  }
+
+  function resetMeters() {
+    for (const name of ["mic", "system"]) {
+      if (peaks[name]) peaks[name].index = -1;
+      $(`meter-${name}`).querySelectorAll(".seg").forEach((seg) => seg.classList.remove("on", "peak"));
+    }
+  }
+
+  function litSegments(level) {
+    if (!level || level <= 0) return 0;
+    const db = 20 * Math.log10(level);
+    return Math.max(0, Math.min(METER_SEGMENTS, Math.round(((db - METER_FLOOR_DB) / -METER_FLOOR_DB) * METER_SEGMENTS)));
+  }
+
+  function setMeter(name, level) {
+    const meter = $(`meter-${name}`);
+    const lit = litSegments(level);
+    const peak = peaks[name];
+    const now = performance.now();
+    if (lit - 1 >= peak.index) {
+      peak.index = lit - 1;
+      peak.until = now + 1200; // hold the peak, then let it fall
+    } else if (now > peak.until) {
+      peak.index = Math.max(lit - 1, peak.index - 1);
+    }
+    [...meter.children].forEach((seg, i) => {
+      seg.classList.toggle("on", i < lit);
+      seg.classList.toggle("peak", i === peak.index && i >= lit);
+    });
+    meter.setAttribute("aria-valuenow", level ? Math.round(20 * Math.log10(level)) : METER_FLOOR_DB);
   }
 
   function updateMeters(data) {
-    for (const name of ["mic", "system"]) {
-      const level = (data.levels || {})[name] || 0;
-      const fill = $(`meter-${name}`);
-      fill.style.width = `${levelPercent(level)}%`;
-      fill.classList.toggle("is-hot", level > 0.9);
-    }
+    for (const name of ["mic", "system"]) setMeter(name, (data.levels || {})[name] || 0);
     if (!data.monitor && !data.ended) $("rec-timer").textContent = fmtTime(data.elapsed);
     if (data.ended && state.monitoring) {
       state.monitoring = false;
@@ -259,9 +297,9 @@
     if (card.hidden) return;
     const hasTranscript = Boolean(s.transcript && s.transcript.segments.length);
     $("transcribe-summary-title").textContent = hasTranscript ? "Transcribe again with different settings" : "Transcription settings";
-    if (!card.dataset.initialised || card.dataset.sessionId !== sid()) {
-      card.dataset.initialised = "1";
-      card.dataset.sessionId = sid();
+    const phase = `${sid()}|${s.audio.file}|${hasTranscript}`;
+    if (card.dataset.phase !== phase) {
+      card.dataset.phase = phase;
       $("transcribe-details").open = !hasTranscript && !busy();
     }
     if (busy()) $("transcribe-details").open = false;
@@ -833,6 +871,7 @@
   wire();
   initTranscribeOptions();
   renderAll({ fullTranscript: true });
+  buildMeters();
   connect();
   loadDevices();
 })();

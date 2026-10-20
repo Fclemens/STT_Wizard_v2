@@ -196,6 +196,7 @@ details > summary { cursor: pointer; font-weight: 700; font-size: 15px; }
   font-size: 11px; background: rgba(50, 38, 20, 0.07); color: var(--muted);
 }
 .pill-transcribing, .pill-reviewing, .pill-analyzing { background: var(--blue-bg); color: var(--blue); }
+.pill-recording { background: var(--error-bg); color: var(--error); }
 .pill-failed { background: var(--error-bg); color: var(--error); }
 .pill-ok { background: var(--accent-bg); color: var(--accent-dark); }
 .pill-warn { background: var(--amber-bg); color: var(--amber); }
@@ -329,12 +330,17 @@ dialog.settings .card-head h2 { margin-right: auto; }
   font: 500 13px "Space Grotesk", sans-serif; color: var(--muted); cursor: pointer;
 }
 .segmented button.is-active { background: var(--panel-strong); color: var(--text); box-shadow: 0 1px 3px rgba(44, 31, 18, 0.12); }
-.source-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 160px; gap: 12px; align-items: center; margin-bottom: 10px; }
+.source-row { display: grid; grid-template-columns: 150px minmax(0, 1fr) 200px; gap: 12px; align-items: center; margin-bottom: 10px; }
 .source-toggle { font-weight: 500; }
 .source-hint { margin: 2px 0 12px; }
-.meter { height: 8px; border-radius: 999px; background: rgba(50, 38, 20, 0.08); overflow: hidden; }
-.meter-fill { height: 100%; width: 0; border-radius: 999px; background: var(--accent); transition: width 0.08s linear; }
-.meter-fill.is-hot { background: var(--error); }
+.meter { display: flex; gap: 2px; height: 14px; }
+.meter .seg { flex: 1; min-width: 2px; border-radius: 2px; background: rgba(50, 38, 20, 0.09); transition: background 0.06s linear; }
+.meter .seg.on { background: var(--accent); }
+.meter .seg.warn.on { background: #d99a2b; }
+.meter .seg.hot.on { background: var(--error); }
+.meter .seg.peak { background: var(--accent-dark); }
+.meter .seg.warn.peak { background: #b07a17; }
+.meter .seg.hot.peak { background: #9a3622; }
 .record-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .btn-record { background: var(--error); border-color: var(--error); color: white; padding: 10px 18px; font-size: 14px; }
 .btn-record:hover:not(:disabled) { background: #9a3622; border-color: #9a3622; color: white; }

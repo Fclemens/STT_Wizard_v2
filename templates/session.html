@@ -67,12 +67,12 @@
             <div class="source-row">
               <label class="check source-toggle"><input type="checkbox" id="use-mic" /> Microphone</label>
               <select id="mic-select" aria-label="Microphone device"></select>
-              <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-mic"></div></div>
+              <div class="meter" id="meter-mic" role="meter" aria-label="Microphone level" aria-valuemin="-60" aria-valuemax="0"></div>
             </div>
             <div class="source-row">
               <label class="check source-toggle"><input type="checkbox" id="use-system" /> System audio</label>
               <select id="system-select" aria-label="Output device to capture"></select>
-              <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-system"></div></div>
+              <div class="meter" id="meter-system" role="meter" aria-label="System audio level" aria-valuemin="-60" aria-valuemax="0"></div>
             </div>
             <p class="muted small source-hint">System audio records what plays on that output: the other people in a Teams/Zoom call, a video, etc. With both on, lines are labelled <b>Me</b> / <b>Others</b>.</p>
             <div class="banner banner-warn small" id="devices-error" hidden></div>
