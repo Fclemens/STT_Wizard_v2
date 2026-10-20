@@ -24,12 +24,14 @@ APP_NAME = "STT Wizard"
 LOG_MAX_BYTES = 5 * 1024 * 1024
 
 LOADING_HTML = """<!doctype html><html><head><meta charset="utf-8"><style>
-html,body{height:100%;margin:0;background:#f5f0e8;color:#1d1a16;font:15px 'Segoe UI',sans-serif}
+html,body{height:100%;margin:0;color:#ece8f7;font:15px 'Segoe UI',sans-serif;
+  background:radial-gradient(ellipse 60% 50% at 0% 0%,rgba(124,58,237,.22),transparent 70%),#0c0a14}
 body{display:grid;place-items:center} .box{text-align:center}
-.bar{width:220px;height:6px;margin:18px auto 0;border-radius:6px;background:rgba(50,38,20,.1);overflow:hidden}
-.bar::after{content:"";display:block;width:35%;height:100%;background:#0e7c66;border-radius:6px;animation:s 1.2s ease-in-out infinite}
+.bar{width:220px;height:6px;margin:18px auto 0;border-radius:6px;background:rgba(255,255,255,.08);overflow:hidden}
+.bar::after{content:"";display:block;width:35%;height:100%;background:linear-gradient(90deg,#8b5cf6,#7dd3fc);border-radius:6px;animation:s 1.2s ease-in-out infinite}
 @keyframes s{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}
-</style></head><body><div class="box"><b>STT Wizard</b><div class="bar"></div></div></body></html>"""
+small{display:block;margin-top:2px;color:#9b94b3;font-size:12px}
+</style></head><body><div class="box"><b>STT Wizard</b><small>by fclementi</small><div class="bar"></div></div></body></html>"""
 
 
 def setup_logging() -> None:
@@ -124,7 +126,7 @@ def main() -> None:
     import webview
 
     webview.settings["ALLOW_DOWNLOADS"] = True
-    window = webview.create_window(APP_NAME, html=LOADING_HTML, width=1360, height=900, min_size=(900, 600))
+    window = webview.create_window(APP_NAME, html=LOADING_HTML, width=1360, height=900, min_size=(900, 600), background_color="#0c0a14")
     window.events.closing += lambda: confirm_close(window)
 
     def boot() -> None:
@@ -138,7 +140,7 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             window.load_html(
-                f"<body style='font:15px Segoe UI;padding:40px'><h2>STT Wizard could not start</h2>"
+                f"<body style='font:15px Segoe UI;padding:40px;background:#0c0a14;color:#ece8f7'><h2>STT Wizard could not start</h2>"
                 f"<p>{exc}</p><p>Details are in <code>{APP_DIR / 'logs' / 'app.log'}</code>.</p></body>"
             )
 
