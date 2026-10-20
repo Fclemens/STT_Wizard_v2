@@ -6,13 +6,15 @@ from typing import Any
 
 import requests
 
+from settings_store import DEFAULT_LLM_MODEL, load_settings
+
 
 def analyze_transcript(text: str) -> dict[str, Any]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return local_analysis(text)
 
-    model = os.getenv("STT_ANALYSIS_MODEL", "gpt-5-mini")
+    model = str(load_settings().get("analysis_model") or DEFAULT_LLM_MODEL)
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     response = requests.post(
         f"{base_url.rstrip('/')}/responses",

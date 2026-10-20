@@ -14,6 +14,8 @@ from typing import Any, Callable
 
 import requests
 
+from settings_store import DEFAULT_LLM_MODEL, load_settings
+
 MAX_BATCH_CHARS = 12_000
 MAX_SUGGESTIONS_PER_BATCH = 40
 
@@ -77,7 +79,7 @@ def review_segments(
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("No OpenAI API key is configured. Add one in Settings.")
-    model = os.getenv("STT_REVIEW_MODEL", "gpt-5-mini")
+    model = str(load_settings().get("review_model") or DEFAULT_LLM_MODEL)
 
     by_id = {seg["id"]: seg for seg in segments}
     batches = batch_segments([seg for seg in segments if seg.get("text", "").strip()])

@@ -19,7 +19,7 @@ import events
 import pipeline
 import session_store as store
 from reviewer import apply_to_text
-from settings_store import load_env_file, load_settings, openai_ready, save_settings, update_env_key
+from settings_store import DEFAULT_LLM_MODEL, load_env_file, load_settings, openai_ready, save_settings, update_env_key
 from stt_engine import (
     ALLOWED_AUDIO_EXTENSIONS,
     ALLOWED_TEXT_EXTENSIONS,
@@ -462,13 +462,13 @@ def api_save_settings(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     for key, kind in allowed.items():
         if key in payload:
             current[key] = kind(payload[key])
+    for key in ("review_model", "analysis_model"):
+        current[key] = str(current.get(key) or "").strip() or DEFAULT_LLM_MODEL
     if current.get("default_model") not in MODEL_OPTIONS:
         current["default_model"] = "turbo"
     save_settings(current)
     if str(payload.get("openai_api_key") or "").strip():
         update_env_key("OPENAI_API_KEY", str(payload["openai_api_key"]))
-    update_env_key("STT_REVIEW_MODEL", str(current["review_model"]))
-    update_env_key("STT_ANALYSIS_MODEL", str(current["analysis_model"]))
     return public_settings()
 
 

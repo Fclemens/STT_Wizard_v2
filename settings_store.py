@@ -8,9 +8,11 @@ BASE_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = BASE_DIR / "settings.json"
 ENV_PATH = BASE_DIR / ".env"
 
+DEFAULT_LLM_MODEL = "gpt-6-luna"
+
 DEFAULT_SETTINGS = {
-    "review_model": "gpt-5-mini",
-    "analysis_model": "gpt-5-mini",
+    "review_model": DEFAULT_LLM_MODEL,
+    "analysis_model": DEFAULT_LLM_MODEL,
     "auto_review": True,
     "auto_analysis": False,
     "default_glossary": "",

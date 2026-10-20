@@ -535,8 +535,8 @@
   async function saveSettings() {
     const payload = {
       openai_api_key: $("set-api-key").value.trim(),
-      review_model: $("set-review-model").value.trim() || "gpt-5-mini",
-      analysis_model: $("set-analysis-model").value.trim() || "gpt-5-mini",
+      review_model: $("set-review-model").value.trim(),
+      analysis_model: $("set-analysis-model").value.trim(),
       auto_review: $("set-auto-review").checked,
       auto_analysis: $("set-auto-analysis").checked,
       default_model: $("set-default-model").value,
