@@ -7,7 +7,7 @@ Both tracks share one recording clock, so they stay aligned:
     resumes, the gap is filled with silence based on wall-clock time.
   * Pausing shifts the clock, so paused time is not padded.
 
-On stop, the tracks are mixed by FFmpeg into a 16 kHz mono file for Whisper.
+On stop, the tracks are mixed into a 16 kHz mono file for Whisper.
 Tracks are kept for speaker labelling (mic = "Me", system = "Others").
 """
 
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import queue
 import struct
-import subprocess
 import threading
 import time
 import wave
@@ -288,18 +287,25 @@ class Capture:
 
 
 def mix_tracks(track_paths: list[Path], target: Path) -> None:
-    """Mix tracks into a 16 kHz mono WAV for Whisper."""
-    inputs: list[str] = []
-    for path in track_paths:
-        inputs += ["-i", str(path)]
-    if len(track_paths) == 1:
-        graph = ["-af", "alimiter=limit=0.95"]
-    else:
-        graph = ["-filter_complex", f"amix=inputs={len(track_paths)}:duration=longest:normalize=0,alimiter=limit=0.95"]
-    command = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", *inputs, *graph, "-ar", "16000", "-ac", "1", str(target)]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RecorderError(f"FFmpeg could not mix the recording: {result.stderr.strip()[:300]}")
+    """Mix tracks into a 16 kHz mono WAV for Whisper (no FFmpeg needed)."""
+    from stt_engine import SAMPLE_RATE, load_audio
+
+    try:
+        tracks = [load_audio(path) for path in track_paths]
+    except Exception as exc:  # noqa: BLE001
+        raise RecorderError(f"Could not read the recorded tracks: {exc}") from exc
+    length = max((len(track) for track in tracks), default=0)
+    mix = np.zeros(length, dtype=np.float32)
+    for track in tracks:
+        mix[: len(track)] += track
+    peak = float(np.abs(mix).max()) if length else 0.0
+    if peak > 0.95:
+        mix *= 0.95 / peak  # keep the sum from clipping
+    with wave.open(str(target), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(SAMPLE_RATE)
+        handle.writeframes((mix * 32767).astype(np.int16).tobytes())
 
 
 def repair_wav(path: Path) -> float:

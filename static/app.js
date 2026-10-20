@@ -311,14 +311,14 @@
     const defaults = (state.settings.default_glossary || "").split("\n").filter((l) => l.trim()).length;
     $("glossary-hint").textContent =
       (defaults ? `Plus ${defaults} term(s) from your default glossary in Settings. ` : "") +
-      "Whisper reads about 150 words of glossary at most: put the hardest names first.";
+      "Keep it short (under ~150 words): the terms are hinted to Whisper throughout the recording.";
   }
 
   function fillModelSelect(select, selected) {
     select.innerHTML = Object.entries(state.models)
       .map(
         ([name, meta]) =>
-          `<option value="${name}" ${name === selected ? "selected" : ""}>${name} — ${meta.speed} · ${meta.vram}${meta.downloaded ? "" : " · downloads on first use"}</option>`
+          `<option value="${name}" ${name === selected ? "selected" : ""}>${name} — ${meta.size}${meta.downloaded ? "" : " · downloads on first use"}</option>`
       )
       .join("");
   }

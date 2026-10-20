@@ -18,7 +18,7 @@ On first run it:
 4. Waits until the local app responds.
 5. Opens the browser at `http://127.0.0.1:8000`.
 
-Dependency installation can take several minutes because Whisper and Torch are large.
+Dependency installation can take several minutes (the NVIDIA GPU libraries alone are about 1 GB).
 
 `START_STT_WIZARD.bat` also installs any new dependencies after an update, so run it once after pulling a new version.
 
@@ -35,7 +35,7 @@ RUN_STT_WIZARD.bat
 - Audio, transcripts, reviews and analyses are stored per session in `data/sessions/<id>/`.
 - App preferences (including the default glossary) are stored in `settings.json`.
 - The OpenAI API key is stored in `.env`.
-- Whisper models are downloaded to the normal Whisper cache, usually `%USERPROFILE%\.cache\whisper`, unless `WHISPER_MODEL_DIR` is configured.
+- Whisper models are downloaded on first use into `models/` inside this folder (or `WHISPER_MODEL_DIR` if set).
 
 Audio transcription is local. OpenAI is only called for Review, Analysis and key testing.
 
@@ -72,7 +72,7 @@ The same glossary tells Review which spellings are authoritative.
 - `Transcription settings → Glossary for this session`: terms for this recording only.
 - After applying a Review suggestion, `+ Glossary` adds the corrected term to the default glossary.
 
-Write one term per line. Whisper only reads about 150 words of prompt, so keep the hardest terms in.
+Write one term per line. The terms are given to Whisper as hotwords for every 30-second window; keep the list short (about 150 words) and put the hardest terms first.
 
 ## OpenAI Settings
 
@@ -83,7 +83,6 @@ Leaving the key field blank keeps the existing saved key.
 
 - Windows
 - Python 3.11 or newer
-- FFmpeg available on PATH, or bundled separately and added to PATH
 - Internet access on first run to install dependencies and download Whisper models
 
 If the Microsoft Store Python alias causes permission errors, install regular Python from python.org and make sure `python` is available in PATH.
@@ -102,4 +101,6 @@ data
 
 ## Notes
 
-This is not a single-file executable. That is intentional: Whisper and Torch are large, and a portable folder is easier to debug and maintain.
+Transcription uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper). With an NVIDIA GPU it runs on the GPU
+(int8/float16: `turbo` needs about 2 GB of video memory); otherwise, or if the GPU fails, it runs on the CPU.
+FFmpeg is not needed: audio is decoded with PyAV.

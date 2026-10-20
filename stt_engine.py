@@ -1,71 +1,162 @@
-"""Local Whisper transcription.
+"""Local Whisper transcription with faster-whisper (CTranslate2).
 
-Audio is processed in ~30 s windows so text can stream to the UI. To keep the
-quality of a single long pass, each window:
-  * ends at the quietest point near the 30 s mark (no words cut in half),
-  * is prompted with the glossary plus the tail of the previous window,
-  * reuses the language detected on the first window.
+* Runs on the NVIDIA GPU when one is usable (int8/float16, so large-v3-turbo
+  fits in ~2 GB of VRAM), otherwise on the CPU (int8). If the GPU fails at
+  runtime (missing CUDA libraries, out of memory) it falls back to the CPU.
+* Models are downloaded on first use as plain files into ``models/<name>``
+  next to the app (portable; no Hugging Face cache or symlinks).
+* Lines stream out as they are decoded; the whole recording is one pass, so
+  Whisper keeps context across it. The glossary goes in as ``hotwords``,
+  which are added to the prompt of every 30 s window.
+* Hallucination guards: voice-activity detection skips silence, and the
+  silence guard (``hallucination_silence_threshold``) drops text invented
+  over pauses. Without it, carrying context made turbo produce long runs of
+  made-up text on our test recording; with it, turbo scored 2.7% WER.
+* Word timestamps are used to split long segments into sentences.
 """
 
 from __future__ import annotations
 
 import os
 import re
-from functools import lru_cache
+import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
+import av
 import numpy as np
-import torch
-import whisper
+
+BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+MODELS_DIR = Path(os.getenv("WHISPER_MODEL_DIR") or Path(__file__).resolve().parent / "models")
 
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".mp4", ".mpeg", ".mpga", ".webm", ".ogg", ".flac"}
 ALLOWED_TEXT_EXTENSIONS = {".txt", ".md"}
+SAMPLE_RATE = 16000
 
-SAMPLE_RATE = whisper.audio.SAMPLE_RATE
-WINDOW_SECONDS = 30
-MIN_CUT_SECONDS = 20
-CONTEXT_WORDS = 40
-
+# key -> faster-whisper model name. Keys stay stable for saved settings.
 MODEL_OPTIONS: dict[str, dict[str, str]] = {
-    "tiny": {"speed": "~10x", "vram": "~1 GB", "best_for": "Quick drafts and low-spec devices."},
-    "base": {"speed": "~7x", "vram": "~1 GB", "best_for": "Balanced starter model for light workloads."},
-    "small": {"speed": "~4x", "vram": "~2 GB", "best_for": "Better quality for meetings and interviews."},
-    "medium": {"speed": "~2x", "vram": "~5 GB", "best_for": "High quality multilingual transcription."},
-    "large": {"speed": "1x", "vram": "~10 GB", "best_for": "Maximum accuracy when hardware allows."},
-    "turbo": {"speed": "~8x", "vram": "~6 GB", "best_for": "Best default: fast and accurate."},
+    "tiny": {"model": "tiny", "size": "75 MB", "best_for": "Quick drafts and low-spec devices."},
+    "base": {"model": "base", "size": "145 MB", "best_for": "Light workloads, fast on CPU."},
+    "small": {"model": "small", "size": "480 MB", "best_for": "Better quality for meetings on CPU."},
+    "medium": {"model": "medium", "size": "1.5 GB", "best_for": "High quality multilingual."},
+    "large": {"model": "large-v3", "size": "3 GB", "best_for": "Maximum accuracy; slow without a GPU."},
+    "turbo": {"model": "turbo", "size": "1.6 GB", "best_for": "Best default: near large-v3 accuracy, fast."},
 }
 
 
-def get_model_cache_dir() -> Path:
-    if model_dir := os.getenv("WHISPER_MODEL_DIR"):
-        return Path(model_dir)
-    if xdg_cache_home := os.getenv("XDG_CACHE_HOME"):
-        return Path(xdg_cache_home) / "whisper"
-    return Path.home() / ".cache" / "whisper"
+# ── Device selection ───────────────────────────────────────────────────────
+
+_cuda_state: dict[str, Any] = {"checked": False, "usable": False, "broken": False}
+_cuda_lock = threading.Lock()
+
+
+def _add_cuda_dll_dirs() -> None:
+    """Make the cuBLAS/cuDNN DLLs from the nvidia-* wheels loadable on Windows."""
+    if os.name != "nt":
+        return
+    candidates: list[Path] = []
+    try:
+        import nvidia  # namespace package from nvidia-cublas-cu12 / nvidia-cudnn-cu12
+
+        for base in nvidia.__path__:
+            candidates += list(Path(base).glob("*/bin"))
+    except ImportError:
+        pass
+    candidates += list((BASE_DIR / "nvidia").glob("*/bin"))  # packaged app layout
+    for directory in candidates:
+        if directory.is_dir():
+            os.add_dll_directory(str(directory))
+            os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+
+
+def cuda_usable() -> bool:
+    with _cuda_lock:
+        if not _cuda_state["checked"]:
+            _cuda_state["checked"] = True
+            try:
+                _add_cuda_dll_dirs()
+                import ctranslate2
+
+                _cuda_state["usable"] = ctranslate2.get_cuda_device_count() > 0
+            except Exception:  # noqa: BLE001
+                _cuda_state["usable"] = False
+        return _cuda_state["usable"] and not _cuda_state["broken"]
+
+
+def _compute_type(device: str) -> str:
+    import ctranslate2
+
+    supported = ctranslate2.get_supported_compute_types(device)
+    preferences = ["int8_float16", "float16", "int8", "float32"] if device == "cuda" else ["int8", "float32"]
+    return next((kind for kind in preferences if kind in supported), "default")
+
+
+def device_label() -> str:
+    return "cuda" if cuda_usable() else "cpu"
+
+
+# ── Models ─────────────────────────────────────────────────────────────────
+
+
+def model_dir(key: str) -> Path:
+    return MODELS_DIR / MODEL_OPTIONS[key]["model"]
+
+
+def is_downloaded(key: str) -> bool:
+    return (model_dir(key) / "model.bin").exists()
 
 
 def get_model_statuses() -> dict[str, dict[str, Any]]:
-    statuses: dict[str, dict[str, Any]] = {}
-    for model_name, meta in MODEL_OPTIONS.items():
-        model_url = getattr(whisper, "_MODELS", {}).get(model_name)
-        checkpoint = get_model_cache_dir() / Path(model_url).name if model_url else None
-        statuses[model_name] = {**meta, "downloaded": bool(checkpoint and checkpoint.exists())}
-    return statuses
+    return {key: {**meta, "downloaded": is_downloaded(key)} for key, meta in MODEL_OPTIONS.items()}
 
 
-def detect_device() -> str:
-    return "cuda" if torch.cuda.is_available() else "cpu"
+_model_lock = threading.Lock()
+_loaded: dict[str, Any] = {"key": None, "device": None, "model": None}
 
 
-@lru_cache(maxsize=2)
-def get_model(model_name: str):
-    download_root = os.getenv("WHISPER_MODEL_DIR") or None
-    return whisper.load_model(model_name, device=detect_device(), download_root=download_root)
+def _ensure_downloaded(key: str) -> Path:
+    from faster_whisper.utils import download_model
+
+    target = model_dir(key)
+    if not is_downloaded(key):
+        target.mkdir(parents=True, exist_ok=True)
+        download_model(MODEL_OPTIONS[key]["model"], output_dir=str(target))
+    return target
 
 
-def load_audio(path: Path) -> np.ndarray:
-    return whisper.load_audio(str(path))
+def get_model(key: str, device: str):
+    """Load (or reuse) one model; only one is kept in memory at a time."""
+    from faster_whisper import WhisperModel
+
+    with _model_lock:
+        if _loaded["key"] == key and _loaded["device"] == device:
+            return _loaded["model"]
+        _loaded.update(key=None, device=None, model=None)  # free VRAM before loading
+        path = _ensure_downloaded(key)
+        model = WhisperModel(str(path), device=device, compute_type=_compute_type(device))
+        _loaded.update(key=key, device=device, model=model)
+        return model
+
+
+# ── Audio ──────────────────────────────────────────────────────────────────
+
+
+def load_audio(path: Path, rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Decode any audio/video file to mono float32 at ``rate`` (PyAV, no FFmpeg install)."""
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=rate)
+    chunks: list[np.ndarray] = []
+    with av.open(str(path)) as container:
+        if not container.streams.audio:
+            raise ValueError("The file has no audio track.")
+        for frame in container.decode(audio=0):
+            for out in resampler.resample(frame):
+                chunks.append(out.to_ndarray().reshape(-1))
+        for out in resampler.resample(None):
+            chunks.append(out.to_ndarray().reshape(-1))
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(chunks).astype(np.float32) / 32768.0
 
 
 # ── Hallucination filters ──────────────────────────────────────────────────
@@ -87,44 +178,59 @@ def is_repetitive_hallucination(text: str) -> bool:
     return False
 
 
-def is_low_confidence_segment(segment: dict[str, Any]) -> bool:
-    text = str(segment.get("text", "")).strip()
+def is_low_confidence_segment(segment) -> bool:
+    text = str(segment.text).strip()
     if not text:
         return True
-    no_speech_prob = float(segment.get("no_speech_prob") or 0.0)
-    avg_logprob = float(segment.get("avg_logprob") or 0.0)
-    if no_speech_prob > 0.75 and avg_logprob < -0.6:
+    if segment.no_speech_prob > 0.75 and segment.avg_logprob < -0.6:
         return True
-    if float(segment.get("compression_ratio") or 0.0) > 2.8:
+    if segment.compression_ratio > 2.8:
         return True
     return is_repetitive_hallucination(text)
 
 
-# ── Windowing ──────────────────────────────────────────────────────────────
+# ── Transcription ──────────────────────────────────────────────────────────
 
 
-def quietest_cut(audio: np.ndarray, start: int, end: int) -> int:
-    """Return a sample index in [start+MIN_CUT, end] with the lowest energy."""
-    search_from = start + MIN_CUT_SECONDS * SAMPLE_RATE
-    if end - search_from < SAMPLE_RATE:
-        return end
-    frame = SAMPLE_RATE // 10  # 100 ms
-    region = audio[search_from:end]
-    usable = len(region) // frame * frame
-    if usable == 0:
-        return end
-    energy = np.sqrt(np.mean(region[:usable].reshape(-1, frame) ** 2, axis=1))
-    best = int(np.argmin(energy))
-    return search_from + best * frame + frame // 2
+def glossary_hotwords(glossary: str) -> str | None:
+    terms = [line.strip() for line in glossary.splitlines() if line.strip()]
+    return ", ".join(terms) or None
 
 
-def build_prompt(glossary: str, previous_text: str) -> str | None:
-    tail = " ".join(previous_text.split()[-CONTEXT_WORDS:])
-    # Whisper keeps only the last ~224 prompt tokens, so the glossary goes last
-    # (closest to the audio) and the running context is kept short.
-    terms = ", ".join(line.strip() for line in glossary.splitlines() if line.strip())
-    parts = [part for part in (tail, terms) if part]
-    return " ".join(parts) or None
+MAX_LINE_SECONDS = 20.0
+
+
+def split_sentences(segment) -> list[tuple[float, float, str]]:
+    """Split a Whisper segment into sentence-sized lines using word timings."""
+    words = list(segment.words or [])
+    if not words:
+        return [(float(segment.start), float(segment.end), segment.text.strip())]
+    lines: list[tuple[float, float, str]] = []
+    current: list = []
+    for word in words:
+        current.append(word)
+        text = word.word.strip()
+        sentence_end = text.endswith((".", "?", "!")) and len(current) >= 3
+        too_long = current[-1].end - current[0].start >= MAX_LINE_SECONDS
+        if sentence_end or too_long:
+            lines.append((float(current[0].start), float(current[-1].end), "".join(w.word for w in current).strip()))
+            current = []
+    if current:
+        if lines and len(current) < 3:
+            start, _, text = lines.pop()  # attach a short tail to the previous line
+            lines.append((start, float(current[-1].end), (text + "".join(w.word for w in current)).strip()))
+        else:
+            lines.append((float(current[0].start), float(current[-1].end), "".join(w.word for w in current).strip()))
+    return [line for line in lines if line[2]]
+
+
+class _CudaFailure(Exception):
+    pass
+
+
+def _looks_like_cuda_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(word in message for word in ("cuda", "cublas", "cudnn", "out of memory"))
 
 
 def transcribe(
@@ -139,86 +245,81 @@ def transcribe(
     on_segments: Callable[[list[dict[str, Any]], int, str], None],
     should_stop: Callable[[], bool],
 ) -> dict[str, Any]:
-    """Transcribe ``audio_path``; stream accepted segments via ``on_segments``.
+    """Transcribe ``audio_path``, streaming accepted lines via ``on_segments``.
 
     Returns metadata (language, device, duration, stopped).
     """
-    on_progress("loading_model", 2)
-    model = get_model(model_name)
-    device = detect_device()
-
-    on_progress("loading_audio", 5)
+    on_progress("loading_audio", 2)
     audio = load_audio(audio_path)
-    total = len(audio)
-    duration = total / SAMPLE_RATE
+    duration = len(audio) / SAMPLE_RATE
 
-    decode_options: dict[str, Any] = {"fp16": device == "cuda"}
-    if accurate:
-        decode_options.update(beam_size=5, best_of=5, temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0))
-    else:
-        decode_options.update(temperature=0.0)
+    device = "cuda" if cuda_usable() else "cpu"
+    if not is_downloaded(model_name):
+        on_progress("downloading_model", 3)
+    on_progress("loading_model", 4)
+    try:
+        return _run(audio, duration, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop)
+    except _CudaFailure:
+        # GPU unusable at runtime: remember it and redo the whole job on the CPU.
+        _cuda_state["broken"] = True
+        on_progress("loading_model", 4)
+        return _run(audio, duration, "cpu", model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop)
 
-    detected_language = language or None
-    previous_text = ""
-    counter = 0
-    start = 0
-    stopped = False
-    on_progress("transcribing", 5)
 
-    while start < total:
-        if should_stop():
-            stopped = True
-            break
-        end = min(total, start + WINDOW_SECONDS * SAMPLE_RATE)
-        if end < total:
-            end = quietest_cut(audio, start, end)
-        chunk = audio[start:end]
-        offset = start / SAMPLE_RATE
-
-        result = model.transcribe(
-            chunk,
-            language=detected_language,
+def _run(audio, duration, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop):
+    try:
+        model = get_model(model_name, device)
+        segments, info = model.transcribe(
+            audio,
+            language=language or None,
             task=task,
-            initial_prompt=build_prompt(glossary, previous_text),
-            condition_on_previous_text=False,
+            beam_size=5 if accurate else 1,
+            best_of=5 if accurate else 1,
+            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0] if accurate else 0.0,
+            hotwords=glossary_hotwords(glossary),
+            condition_on_previous_text=True,
+            word_timestamps=True,
+            hallucination_silence_threshold=2.0,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
             compression_ratio_threshold=2.4,
-            logprob_threshold=-1.0,
+            log_prob_threshold=-1.0,
             no_speech_threshold=0.6,
-            verbose=None,
-            **decode_options,
         )
-        if not detected_language and result.get("language"):
-            detected_language = result["language"]
-
-        accepted: list[dict[str, Any]] = []
-        for segment in result.get("segments", []):
+        on_progress("transcribing", 5)
+        counter = 0
+        stopped = False
+        emitted = False
+        for segment in segments:
+            if should_stop():
+                stopped = True
+                break
+            progress = 5 + int(min(segment.end / duration, 1.0) * 93) if duration else 98
             if is_low_confidence_segment(segment):
+                on_segments([], progress, info.language)
                 continue
-            text = str(segment.get("text", "")).strip()
-            counter += 1
-            accepted.append(
-                {
-                    "id": f"s{counter:05}",
-                    "start": round(float(segment.get("start", 0.0)) + offset, 2),
-                    "end": round(min(float(segment.get("end", 0.0)) + offset, duration), 2),
-                    "text": text,
-                    "original_text": text,
-                    "speaker": None,
-                }
-            )
-        chunk_text = " ".join(seg["text"] for seg in accepted)
-        if accepted and is_repetitive_hallucination(chunk_text):
-            accepted = []
-        if accepted:
-            previous_text = chunk_text
-
-        start = end
-        progress = 5 + int(start / total * 93) if total else 98
-        on_segments(accepted, progress, detected_language or "")
-
+            lines = []
+            for start, end, text in split_sentences(segment):
+                counter += 1
+                lines.append(
+                    {
+                        "id": f"s{counter:05}",
+                        "start": round(start, 2),
+                        "end": round(min(end, duration), 2),
+                        "text": text,
+                        "original_text": text,
+                        "speaker": None,
+                    }
+                )
+            on_segments(lines, progress, info.language)
+            emitted = True
+    except Exception as exc:
+        if device == "cuda" and not emitted and _looks_like_cuda_error(exc):
+            raise _CudaFailure from exc
+        raise
     return {
-        "language": detected_language or "unknown",
-        "device": device,
+        "language": info.language or "unknown",
+        "device": f"{device} · {_compute_type(device)}",
         "duration": round(duration, 2),
         "stopped": stopped,
     }

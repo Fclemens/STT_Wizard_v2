@@ -2,7 +2,11 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.2
 jinja2==3.1.6
 python-multipart==0.0.20
-openai-whisper==20250625
-torch>=2.2.0
 requests>=2.32.0
+numpy>=1.26
+faster-whisper>=1.1.0
+av>=12
 PyAudioWPatch>=0.2.12.7; sys_platform == "win32"
+# NVIDIA GPU support (CUDA 12 / cuDNN 9 runtime libraries). Unused without an NVIDIA GPU.
+nvidia-cublas-cu12; sys_platform == "win32"
+nvidia-cudnn-cu12>=9,<10; sys_platform == "win32"
