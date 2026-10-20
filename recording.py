@@ -150,6 +150,12 @@ def discard(session_id: str) -> None:
             capture.stop()
 
 
+def active_recording() -> str | None:
+    """Session id currently recording (not a level check), if any."""
+    with _lock:
+        return _owner if _capture is not None and _capture.write else None
+
+
 def is_recording(session_id: str) -> bool:
     with _lock:
         return _capture is not None and _capture.write and _owner == session_id

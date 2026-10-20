@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-SETTINGS_PATH = BASE_DIR / "settings.json"
-ENV_PATH = BASE_DIR / ".env"
+from paths import APP_DIR
+
+SETTINGS_PATH = APP_DIR / "settings.json"
+ENV_PATH = APP_DIR / ".env"
 
 DEFAULT_LLM_MODEL = "gpt-6-luna"
 

@@ -12,14 +12,14 @@
   silence guard (``hallucination_silence_threshold``) drops text invented
   over pauses. Without it, carrying context made turbo produce long runs of
   made-up text on our test recording; with it, turbo scored 2.7% WER.
-* Word timestamps are used to split long segments into sentences.
+* Word timestamps are used to cut the text into sentence lines, also across
+  Whisper's segment boundaries (which often fall mid-sentence).
 """
 
 from __future__ import annotations
 
 import os
 import re
-import sys
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -27,8 +27,9 @@ from typing import Any, Callable
 import av
 import numpy as np
 
-BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-MODELS_DIR = Path(os.getenv("WHISPER_MODEL_DIR") or Path(__file__).resolve().parent / "models")
+from paths import APP_DIR, RESOURCE_DIR
+
+MODELS_DIR = Path(os.getenv("WHISPER_MODEL_DIR") or APP_DIR / "models")
 
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".mp4", ".mpeg", ".mpga", ".webm", ".ogg", ".flac"}
 ALLOWED_TEXT_EXTENSIONS = {".txt", ".md"}
@@ -63,7 +64,7 @@ def _add_cuda_dll_dirs() -> None:
             candidates += list(Path(base).glob("*/bin"))
     except ImportError:
         pass
-    candidates += list((BASE_DIR / "nvidia").glob("*/bin"))  # packaged app layout
+    candidates += list((RESOURCE_DIR / "nvidia").glob("*/bin"))  # packaged app layout
     for directory in candidates:
         if directory.is_dir():
             os.add_dll_directory(str(directory))
@@ -198,30 +199,39 @@ def glossary_hotwords(glossary: str) -> str | None:
 
 
 MAX_LINE_SECONDS = 20.0
+MAX_JOIN_GAP_SECONDS = 1.5
 
 
-def split_sentences(segment) -> list[tuple[float, float, str]]:
-    """Split a Whisper segment into sentence-sized lines using word timings."""
-    words = list(segment.words or [])
-    if not words:
-        return [(float(segment.start), float(segment.end), segment.text.strip())]
-    lines: list[tuple[float, float, str]] = []
-    current: list = []
-    for word in words:
-        current.append(word)
-        text = word.word.strip()
-        sentence_end = text.endswith((".", "?", "!")) and len(current) >= 3
-        too_long = current[-1].end - current[0].start >= MAX_LINE_SECONDS
-        if sentence_end or too_long:
-            lines.append((float(current[0].start), float(current[-1].end), "".join(w.word for w in current).strip()))
-            current = []
-    if current:
-        if lines and len(current) < 3:
-            start, _, text = lines.pop()  # attach a short tail to the previous line
-            lines.append((start, float(current[-1].end), (text + "".join(w.word for w in current)).strip()))
-        else:
-            lines.append((float(current[0].start), float(current[-1].end), "".join(w.word for w in current).strip()))
-    return [line for line in lines if line[2]]
+class SentenceLines:
+    """Turn Whisper's word stream into sentence lines.
+
+    Whisper's segment boundaries often fall mid-sentence, so an unfinished
+    sentence is held back and continued with the next segment's words. It is
+    emitted on its own after a pause, after MAX_LINE_SECONDS, or at the end.
+    """
+
+    def __init__(self) -> None:
+        self.pending: list = []
+
+    def feed(self, segment) -> list[tuple[float, float, str]]:
+        words = list(segment.words or [])
+        if not words:  # no word timings: keep the segment as one line
+            return self.flush() + [(float(segment.start), float(segment.end), segment.text.strip())]
+        lines: list[tuple[float, float, str]] = []
+        if self.pending and words[0].start - self.pending[-1].end > MAX_JOIN_GAP_SECONDS:
+            lines += self.flush()
+        for word in words:
+            self.pending.append(word)
+            sentence_end = word.word.strip().endswith((".", "?", "!")) and len(self.pending) >= 3
+            too_long = self.pending[-1].end - self.pending[0].start >= MAX_LINE_SECONDS
+            if sentence_end or too_long:
+                lines += self.flush()
+        return lines
+
+    def flush(self) -> list[tuple[float, float, str]]:
+        words, self.pending = self.pending, []
+        text = "".join(w.word for w in words).strip()
+        return [(float(words[0].start), float(words[-1].end), text)] if text else []
 
 
 class _CudaFailure(Exception):
@@ -287,19 +297,15 @@ def _run(audio, duration, device, model_name, language, task, glossary, accurate
             no_speech_threshold=0.6,
         )
         on_progress("transcribing", 5)
+        sentences = SentenceLines()
         counter = 0
         stopped = False
         emitted = False
-        for segment in segments:
-            if should_stop():
-                stopped = True
-                break
-            progress = 5 + int(min(segment.end / duration, 1.0) * 93) if duration else 98
-            if is_low_confidence_segment(segment):
-                on_segments([], progress, info.language)
-                continue
+
+        def emit(raw_lines: list[tuple[float, float, str]], progress: int) -> None:
+            nonlocal counter
             lines = []
-            for start, end, text in split_sentences(segment):
+            for start, end, text in raw_lines:
                 counter += 1
                 lines.append(
                     {
@@ -312,7 +318,18 @@ def _run(audio, duration, device, model_name, language, task, glossary, accurate
                     }
                 )
             on_segments(lines, progress, info.language)
+
+        for segment in segments:
+            if should_stop():
+                stopped = True
+                break
+            progress = 5 + int(min(segment.end / duration, 1.0) * 93) if duration else 98
+            if is_low_confidence_segment(segment):
+                emit([], progress)
+                continue
+            emit(sentences.feed(segment), progress)
             emitted = True
+        emit(sentences.flush(), 98)
     except Exception as exc:
         if device == "cuda" and not emitted and _looks_like_cuda_error(exc):
             raise _CudaFailure from exc

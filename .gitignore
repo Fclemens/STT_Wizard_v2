@@ -22,3 +22,7 @@ _backup_*/
 
 # Downloaded Whisper models
 models/
+
+# Desktop app runtime files
+logs/
+webview-cache/

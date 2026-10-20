@@ -185,6 +185,8 @@
     $("record-btn").disabled = busy() || !state.devices.available || !anySource;
     $("check-levels").disabled = busy() || !state.devices.available || !anySource;
     $("check-levels").textContent = state.monitoring ? "Stop level check" : "Check levels";
+    $("refresh-devices").hidden = state.inputMode !== "record";
+    $("refresh-devices").disabled = busy() || state.monitoring;
     if (!recording && !state.monitoring) resetMeters();
     if (recording) {
       const paused = job.stage === "paused";
@@ -259,15 +261,28 @@
       .join("");
   }
 
-  async function loadDevices() {
+  async function loadDevices({ refresh = false } = {}) {
+    const before = state.devices;
+    const chosen = (select) => (select.selectedOptions[0] ? select.selectedOptions[0].dataset.name : "");
+    // On refresh keep what the user picked; on first load use the remembered devices.
+    const micName = (refresh && chosen($("mic-select"))) || state.settings.mic_device;
+    const systemName = (refresh && chosen($("system-select"))) || state.settings.system_device;
+    const keepMic = refresh && before.mics.length ? $("use-mic").checked : state.settings.record_mic !== false;
+    const keepSystem = refresh && before.systems.length ? $("use-system").checked : state.settings.record_system !== false;
+
     let devices = null;
     try { devices = await api("/api/audio/devices"); } catch (error) { devices = { available: false, error: error.message }; }
     state.devices = { mics: [], systems: [], ...devices };
     const { mics, systems } = state.devices;
-    fillDeviceSelect($("mic-select"), mics, state.settings.mic_device);
-    fillDeviceSelect($("system-select"), systems, state.settings.system_device);
-    $("use-mic").checked = state.settings.record_mic !== false && mics.length > 0;
-    $("use-system").checked = state.settings.record_system !== false && systems.length > 0;
+    fillDeviceSelect($("mic-select"), mics, micName);
+    fillDeviceSelect($("system-select"), systems, systemName);
+    $("use-mic").checked = keepMic && mics.length > 0;
+    $("use-system").checked = keepSystem && systems.length > 0;
+    if (refresh) {
+      const known = new Set([...before.mics, ...before.systems].map((d) => d.name));
+      const added = [...mics, ...systems].filter((d) => !known.has(d.name)).map((d) => d.name);
+      toast(added.length ? `New: ${added.join(", ")}` : `${mics.length} microphone(s), ${systems.length} output(s) found. No new devices.`);
+    }
     const problem = !state.devices.available ? state.devices.error : !mics.length && !systems.length ? "No audio input devices were found." : "";
     $("devices-error").hidden = !problem;
     $("devices-error").textContent = problem || "";
@@ -766,6 +781,11 @@
     ["use-mic", "use-system"].forEach((id) => $(id).addEventListener("change", renderRecordControls));
     $("record-btn").addEventListener("click", startRecording);
     $("check-levels").addEventListener("click", toggleLevelCheck);
+    $("refresh-devices").addEventListener("click", async () => {
+      const button = $("refresh-devices");
+      button.disabled = true;
+      await loadDevices({ refresh: true }); // re-renders the controls, re-enabling the button
+    });
     $("pause-btn").addEventListener("click", () => recordingAction(state.session.job && state.session.job.stage === "paused" ? "resume" : "pause"));
     $("stop-btn").addEventListener("click", () => recordingAction("stop"));
     $("stop-only-btn").addEventListener("click", () => recordingAction("stop", { transcribe: false }));

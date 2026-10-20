@@ -2,7 +2,34 @@
 
 This folder is a portable copy of the local Speech-to-Text Wizard.
 
-## Run
+## Desktop app (recommended)
+
+`STT Wizard.exe` runs the app in its own window: no Python, browser or FFmpeg needed on the target PC.
+
+**Build it** (needs Python 3.11+ on the build PC): double-click
+
+```text
+BUILD_EXE.bat
+```
+
+It builds outside this folder (in `%LOCALAPPDATA%\STTWizardBuild`, so OneDrive does not sync ~2 GB of build files)
+and produces:
+
+- `dist\STT Wizard\STT Wizard.exe` — the app folder (about 1 GB, mostly the NVIDIA GPU library)
+- `STT-Wizard-win64.zip` — the same folder zipped, to copy to another PC
+
+**Use it:** unzip anywhere (not in a synced folder if you record long meetings) and run `STT Wizard.exe`.
+Everything stays inside that folder: `data\` (sessions, recordings), `models\` (Whisper models, downloaded on first
+use), `settings.json`, `.env` (API key) and `logs\app.log` (for troubleshooting).
+
+Notes:
+
+- Requires Windows 10/11 with Microsoft Edge WebView2 (preinstalled on current Windows).
+- The exe is not code-signed: Windows SmartScreen may warn on first launch (`More info` → `Run anyway`),
+  and managed company PCs may block it until IT allows it.
+- Only one copy runs per folder. Closing the window during a recording asks to stop and save it first.
+
+## Run from source (development)
 
 For the first run, double-click:
 
@@ -18,7 +45,7 @@ On first run it:
 4. Waits until the local app responds.
 5. Opens the browser at `http://127.0.0.1:8000`.
 
-Dependency installation can take several minutes (the NVIDIA GPU libraries alone are about 1 GB).
+Dependency installation can take several minutes (the NVIDIA GPU library alone is about 750 MB).
 
 `START_STT_WIZARD.bat` also installs any new dependencies after an update, so run it once after pulling a new version.
 

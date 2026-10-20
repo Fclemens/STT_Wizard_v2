@@ -7,6 +7,7 @@ numpy>=1.26
 faster-whisper>=1.1.0
 av>=12
 PyAudioWPatch>=0.2.12.7; sys_platform == "win32"
-# NVIDIA GPU support (CUDA 12 / cuDNN 9 runtime libraries). Unused without an NVIDIA GPU.
+# NVIDIA GPU support: CTranslate2 needs only cuBLAS for Whisper (tested; cuDNN not required).
 nvidia-cublas-cu12; sys_platform == "win32"
-nvidia-cudnn-cu12>=9,<10; sys_platform == "win32"
+# Desktop window (Edge WebView2) for desktop.py / the exe
+pywebview>=5

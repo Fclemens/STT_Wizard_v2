@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 import events
 import pipeline
+from paths import RESOURCE_DIR
 import recording
 import session_store as store
 from recorder import RecorderError, export_mp3, list_devices
@@ -34,8 +35,7 @@ from stt_engine import (
 
 load_env_file()
 
-BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+templates = Jinja2Templates(directory=str(RESOURCE_DIR / "templates"))
 
 
 @asynccontextmanager
@@ -48,7 +48,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="STT Wizard", version="0.3.0", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+app.mount("/static", StaticFiles(directory=RESOURCE_DIR / "static"), name="static")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

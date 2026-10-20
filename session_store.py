@@ -21,8 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-BASE_DIR = Path(__file__).resolve().parent
-SESSIONS_DIR = BASE_DIR / "data" / "sessions"
+from paths import APP_DIR
+
+SESSIONS_DIR = APP_DIR / "data" / "sessions"
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 SCHEMA_VERSION = 1

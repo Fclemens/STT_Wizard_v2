@@ -4,9 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{{ session.name }} — STT Wizard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/fonts/fonts.css" />
     <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body>
@@ -60,6 +58,10 @@
               <button type="button" role="tab" data-mode="record" class="is-active">Record</button>
               <button type="button" role="tab" data-mode="upload">Upload a file</button>
             </div>
+            <button type="button" class="btn btn-ghost btn-sm" id="refresh-devices" title="Look for newly connected microphones and outputs">
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Refresh devices
+            </button>
           </div>
 
           <div id="record-panel">
