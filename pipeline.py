@@ -260,7 +260,12 @@ def _run_review(session_id: str, chain_analysis: bool) -> None:
             language=str(transcript.get("language") or "auto"),
             glossary=effective_glossary(session),
             on_progress=lambda done, total: _set_job(
-                session_id, "reviewing", int(done / max(total, 1) * 100), f"Reviewed part {done} of {total}…"
+                session_id,
+                "reviewing",
+                int(done / max(total, 1) * 100),
+                "Checking the whole transcript…"
+                if total == 1
+                else f"Reviewing part {done + 1} of {total} (with the full transcript as context)…",
             ),
         )
     except Exception as exc:  # noqa: BLE001

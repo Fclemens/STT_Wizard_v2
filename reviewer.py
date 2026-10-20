@@ -2,6 +2,11 @@
 
 Each suggestion points at one transcript line (``segment_id``) and an exact
 substring of it, so applying it edits only that line.
+
+The whole transcript is reviewed in one call whenever it fits (a 2-hour
+meeting is ~120k characters), so the model sees every mention of a name or
+term. Longer transcripts are split into parts, and each part is sent with the
+full transcript as read-only context so corrections stay consistent.
 """
 
 from __future__ import annotations
@@ -16,8 +21,11 @@ import requests
 
 from settings_store import DEFAULT_LLM_MODEL, load_settings
 
-MAX_BATCH_CHARS = 12_000
-MAX_SUGGESTIONS_PER_BATCH = 40
+SINGLE_CALL_MAX_CHARS = 200_000   # ~10 h of speech, ~50k tokens: review in one call
+PART_MAX_CHARS = 60_000           # longer transcripts: parts of this size...
+CONTEXT_MAX_CHARS = 1_000_000     # ...each with the full transcript as context, if it fits
+MAX_SUGGESTIONS_PER_CALL = 150
+REQUEST_TIMEOUT_SECONDS = 600
 
 INSTRUCTIONS = (
     "You review speech-to-text transcripts and return only JSON. "
@@ -28,7 +36,11 @@ INSTRUCTIONS = (
     "(copy it character for character, keep it short: just the wrong word or phrase); 'suggested' is only the "
     "replacement text, with no alternatives or comments; 'justification' explains why, briefly, for the user. "
     "When a glossary is provided, treat it as the authoritative spelling of names and terms and flag near-misses. "
-    "Return an empty suggestions array if nothing is likely wrong."
+    "Use the whole transcript to keep corrections consistent: a name or term spelled clearly in one place tells you "
+    "how garbled versions elsewhere should read. If 'context' is provided, it is the full transcript for reference "
+    "only: flag lines from 'transcript' only. "
+    f"Return at most {MAX_SUGGESTIONS_PER_CALL} suggestions, most important first, "
+    "or an empty suggestions array if nothing is likely wrong."
 )
 
 SCHEMA = {
@@ -54,13 +66,20 @@ SCHEMA = {
 }
 
 
+def format_lines(segments: list[dict[str, Any]]) -> str:
+    return "\n".join(f"[{seg['id']}] {seg['text'].strip()}" for seg in segments)
+
+
 def batch_segments(segments: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """One batch when the transcript fits in a single call, else parts of PART_MAX_CHARS."""
+    if len(format_lines(segments)) <= SINGLE_CALL_MAX_CHARS:
+        return [segments] if segments else []
     batches: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     size = 0
     for segment in segments:
         length = len(segment.get("text", "")) + 12
-        if current and size + length > MAX_BATCH_CHARS:
+        if current and size + length > PART_MAX_CHARS:
             batches.append(current)
             current, size = [], 0
         current.append(segment)
@@ -82,16 +101,19 @@ def review_segments(
     model = str(load_settings().get("review_model") or DEFAULT_LLM_MODEL)
 
     by_id = {seg["id"]: seg for seg in segments}
-    batches = batch_segments([seg for seg in segments if seg.get("text", "").strip()])
+    spoken = [seg for seg in segments if seg.get("text", "").strip()]
+    batches = batch_segments(spoken)
+    full_text = format_lines(spoken)
+    context = full_text if len(batches) > 1 and len(full_text) <= CONTEXT_MAX_CHARS else None
     suggestions: list[dict[str, Any]] = []
     discarded = 0
     seen: set[tuple[str, str, str]] = set()
 
-    for index, batch in enumerate(batches, start=1):
+    for index, batch in enumerate(batches):
         if on_progress:
             on_progress(index, len(batches))
-        raw = _call_llm(api_key, model, batch, language, glossary)
-        for item in raw[:MAX_SUGGESTIONS_PER_BATCH]:
+        raw = _call_llm(api_key, model, batch, language, glossary, context)
+        for item in raw[:MAX_SUGGESTIONS_PER_CALL]:
             segment = by_id.get(str(item.get("segment_id", "")).strip())
             original = str(item.get("original", "")).strip()
             suggested = str(item.get("suggested", "")).strip()
@@ -120,15 +142,19 @@ def review_segments(
         "model": model,
         "created_at": None,
         "batches": len(batches),
+        "full_context": len(batches) == 1 or context is not None,
         "discarded": discarded,
         "glossary_used": bool(glossary.strip()),
         "suggestions": suggestions,
     }
 
 
-def _call_llm(api_key: str, model: str, batch: list[dict[str, Any]], language: str, glossary: str) -> list[dict[str, Any]]:
-    lines = "\n".join(f"[{seg['id']}] {seg['text'].strip()}" for seg in batch)
-    user_payload = {"language": language, "glossary": glossary.strip() or None, "transcript": lines}
+def _call_llm(
+    api_key: str, model: str, batch: list[dict[str, Any]], language: str, glossary: str, context: str | None
+) -> list[dict[str, Any]]:
+    user_payload = {"language": language, "glossary": glossary.strip() or None, "transcript": format_lines(batch)}
+    if context:
+        user_payload["context"] = context
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     response = requests.post(
         f"{base_url.rstrip('/')}/responses",
@@ -141,7 +167,7 @@ def _call_llm(api_key: str, model: str, batch: list[dict[str, Any]], language: s
             ],
             "text": {"format": {"type": "json_schema", "name": "transcript_review", "strict": True, "schema": SCHEMA}},
         },
-        timeout=180,
+        timeout=REQUEST_TIMEOUT_SECONDS,
     )
     if not response.ok:
         raise RuntimeError(extract_api_error(response))
