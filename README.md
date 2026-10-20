@@ -79,11 +79,13 @@ Everything happens on one page per session:
      If the app itself closes mid-recording, the audio captured so far is recovered on next start.
    - Let everyone know they are being recorded.
 
-   Or **Upload a file**: drop an audio file (or a `.txt` transcript to go straight to Review).
-3. Lines stream in as Whisper works. Open `Transcription settings` to pick another model or language,
-   turn on translation, or edit the session glossary, then `Transcribe again`.
-4. When the transcript is done, Review runs automatically (if an OpenAI key is set and auto-review is on).
-   Suspicious words are highlighted in the transcript; apply, edit or dismiss each suggestion.
+   Or **Upload a file**: drop an audio file (MP3, WAV, M4A, MP4, WebM, OGG, FLAC), check `Transcription settings`
+   (model, language, glossary) and click `Transcribe`. A `.txt` transcript skips straight to Review.
+3. Lines stream in as Whisper works. To redo it with another model or language, open
+   `Transcribe again with different settings`.
+4. When the transcript is done, Review runs automatically (if an OpenAI key is set and auto-review is on in
+   Settings; otherwise click `Run review`). Suspicious words are highlighted in the transcript; apply, edit or
+   dismiss each suggestion.
 5. Click a timestamp to play the audio from that line; click any line to edit it.
 6. Export the corrected or original transcript as TXT, SRT, VTT or JSON.
 7. Run Analysis for a summary, key points, action items and open questions.

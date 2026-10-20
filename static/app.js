@@ -675,8 +675,7 @@
     const session = await run(() => api(`/api/sessions/${sid()}/upload`, { method: "POST", body: form }));
     if (!session) return;
     applySession(session);
-    if (session.audio) startTranscription();
-    else toast("Transcript imported. You can review it now.");
+    toast(session.audio ? "File added. Check the transcription settings, then click Transcribe." : "Transcript imported. You can review it now.");
   }
 
   async function startTranscription() {
