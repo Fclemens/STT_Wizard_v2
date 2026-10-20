@@ -11,8 +11,12 @@ ENV_PATH = BASE_DIR / ".env"
 DEFAULT_SETTINGS = {
     "review_model": "gpt-5-mini",
     "analysis_model": "gpt-5-mini",
-    "auto_review": False,
+    "auto_review": True,
     "auto_analysis": False,
+    "default_glossary": "",
+    "default_model": "turbo",
+    "default_language": "",
+    "accurate_decoding": True,
 }
 
 

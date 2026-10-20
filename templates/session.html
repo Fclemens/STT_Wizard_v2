@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ session.name }} — STT Wizard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- Sidebar ------------------------------------------------------- -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="0.5" y="5" width="2" height="6" rx="1" fill="white"/>
+              <rect x="4" y="2.5" width="2" height="11" rx="1" fill="white"/>
+              <rect x="7.5" y="0.5" width="2" height="15" rx="1" fill="white"/>
+              <rect x="11" y="3.5" width="2" height="9" rx="1" fill="white"/>
+              <rect x="14.5" y="6" width="2" height="5" rx="1" fill="white"/>
+            </svg>
+          </div>
+          <span class="brand-name">STT Wizard</span>
+        </div>
+        <button type="button" class="btn btn-primary btn-block" id="new-session">+ New session</button>
+        <p class="sidebar-label">Sessions</p>
+        <nav class="session-list" id="session-list" aria-label="Sessions"></nav>
+        <button type="button" class="btn btn-ghost btn-block settings-btn" id="open-settings">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          Settings
+        </button>
+      </aside>
+
+      <!-- Main ---------------------------------------------------------- -->
+      <main class="main">
+        <header class="session-header">
+          <input class="session-name" id="session-name" aria-label="Session name" />
+          <ol class="stepper" id="stepper" aria-label="Progress">
+            <li data-step="audio">Audio</li>
+            <li data-step="transcript">Transcript</li>
+            <li data-step="review">Review</li>
+            <li data-step="analysis">Analysis</li>
+          </ol>
+          <button type="button" class="icon-btn" id="delete-session" title="Delete session" aria-label="Delete session">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </header>
+
+        <div class="banner banner-error" id="error-banner" hidden></div>
+        <div class="banner banner-info" id="toast" hidden></div>
+
+        <!-- Capture / input -->
+        <section class="card" id="input-card">
+          <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Add audio or transcript file">
+            <input type="file" id="file-input" hidden />
+            <svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l4.5 4.5-1.4 1.4-2.1-2.1V15h-2V7.8L8.9 9.9 7.5 8.5 12 4zm-6 12h12v2H6v-2z" fill="currentColor"/></svg>
+            <strong>Drop an audio file here, or click to browse</strong>
+            <span class="muted" id="dropzone-formats"></span>
+            <span class="muted small">A .txt transcript also works: it skips straight to Review.</span>
+          </div>
+          <div class="audio-bar" id="audio-bar" hidden>
+            <div class="audio-meta">
+              <span class="audio-name" id="audio-name"></span>
+              <span class="muted small" id="audio-info"></span>
+            </div>
+            <audio id="player" controls preload="metadata"></audio>
+            <button type="button" class="btn btn-ghost btn-sm" id="replace-audio">Replace</button>
+          </div>
+        </section>
+
+        <!-- Transcription settings -->
+        <section class="card" id="transcribe-card" hidden>
+          <details id="transcribe-details" open>
+            <summary><span id="transcribe-summary-title">Transcription settings</span></summary>
+            <div class="form-grid">
+              <label>Whisper model
+                <select id="opt-model"></select>
+              </label>
+              <label>Language
+                <input id="opt-language" list="language-list" placeholder="Auto-detect" />
+                <datalist id="language-list">
+                  <option value="en">English</option><option value="it">Italian</option><option value="fr">French</option>
+                  <option value="de">German</option><option value="es">Spanish</option><option value="pt">Portuguese</option>
+                  <option value="nl">Dutch</option>
+                </datalist>
+              </label>
+              <label class="check"><input type="checkbox" id="opt-accurate" /> Accurate decoding <span class="muted small">(beam search, slower)</span></label>
+              <label class="check"><input type="checkbox" id="opt-translate" /> Translate to English</label>
+              <label class="span-2">Glossary for this session
+                <textarea id="opt-glossary" rows="3" placeholder="One term per line: names, acronyms, products, clients…"></textarea>
+                <span class="muted small" id="glossary-hint"></span>
+              </label>
+            </div>
+            <div class="actions">
+              <button type="button" class="btn btn-primary" id="start-transcribe">Transcribe</button>
+            </div>
+          </details>
+        </section>
+
+        <!-- Job progress -->
+        <section class="card job-card" id="job-card" hidden>
+          <div class="job-row">
+            <div>
+              <strong id="job-title"></strong>
+              <span class="muted" id="job-message"></span>
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" id="stop-job">Stop</button>
+          </div>
+          <div class="progress"><div class="progress-fill" id="job-progress"></div></div>
+        </section>
+
+        <!-- Transcript + review -->
+        <section class="workspace" id="workspace" hidden>
+          <div class="card transcript-card">
+            <div class="card-head">
+              <h2>Transcript</h2>
+              <span class="muted small" id="transcript-meta"></span>
+              <label class="check small follow-toggle"><input type="checkbox" id="follow-audio" checked /> Follow audio</label>
+            </div>
+            <p class="muted small hint">Click a timestamp to play from there. Click any text to edit it; changes save automatically.</p>
+            <div class="lines" id="lines"></div>
+            <div class="export-bar">
+              <span class="muted small">Export</span>
+              <select id="export-version" aria-label="Export version">
+                <option value="corrected">Corrected</option>
+                <option value="original">Original</option>
+              </select>
+              <div class="export-buttons" id="export-buttons"></div>
+            </div>
+          </div>
+
+          <div class="card review-card">
+            <div class="card-head">
+              <h2>Review</h2>
+              <span class="muted small" id="review-meta"></span>
+              <button type="button" class="btn btn-primary btn-sm" id="run-review">Run review</button>
+            </div>
+            <div class="banner banner-warn small" id="no-key-banner" hidden>
+              Review needs an OpenAI API key. <a href="#" id="no-key-settings">Open Settings</a>
+            </div>
+            <div class="review-filters" id="review-filters" hidden>
+              <button type="button" class="chip is-active" data-filter="pending">To check <span id="count-pending"></span></button>
+              <button type="button" class="chip" data-filter="done">Handled <span id="count-done"></span></button>
+              <button type="button" class="btn btn-ghost btn-sm" id="apply-all">Apply all</button>
+            </div>
+            <div class="suggestions" id="suggestions"></div>
+          </div>
+        </section>
+
+        <!-- Analysis -->
+        <section class="card" id="analysis-card" hidden>
+          <div class="card-head">
+            <h2>Analysis</h2>
+            <span class="muted small" id="analysis-meta"></span>
+            <button type="button" class="btn btn-ghost btn-sm" id="run-analysis">Run analysis</button>
+          </div>
+          <div id="analysis-body"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Settings dialog ------------------------------------------------- -->
+    <dialog class="settings" id="settings-dialog">
+      <form method="dialog" id="settings-form">
+        <div class="card-head">
+          <h2>Settings</h2>
+          <button type="button" class="icon-btn" id="close-settings" aria-label="Close">✕</button>
+        </div>
+        <h3>OpenAI (review &amp; analysis)</h3>
+        <label>API key
+          <input type="password" id="set-api-key" autocomplete="off" placeholder="Leave blank to keep the saved key" />
+          <span class="muted small" id="key-status"></span>
+        </label>
+        <div class="actions left"><button type="button" class="btn btn-ghost btn-sm" id="test-key">Test key</button></div>
+        <div class="form-grid">
+          <label>Review model <input id="set-review-model" /></label>
+          <label>Analysis model <input id="set-analysis-model" /></label>
+          <label class="check"><input type="checkbox" id="set-auto-review" /> Review automatically after transcription</label>
+          <label class="check"><input type="checkbox" id="set-auto-analysis" /> Analyse automatically</label>
+        </div>
+        <h3>Transcription defaults</h3>
+        <div class="form-grid">
+          <label>Default model <select id="set-default-model"></select></label>
+          <label>Default language <input id="set-default-language" list="language-list" placeholder="Auto-detect" /></label>
+          <label class="check span-2"><input type="checkbox" id="set-accurate" /> Accurate decoding by default</label>
+          <label class="span-2">Default glossary <span class="muted small">(added to every session; also used by Review)</span>
+            <textarea id="set-glossary" rows="6" placeholder="One term per line"></textarea>
+          </label>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn btn-primary" id="save-settings">Save settings</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script id="bootstrap" type="application/json">{{ bootstrap_json|safe }}</script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

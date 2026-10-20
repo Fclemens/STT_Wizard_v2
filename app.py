@@ -1,680 +1,502 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import shutil
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import requests
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from analyzer import analyze_transcript
-from project_store import (
-    create_project,
-    delete_project,
-    ensure_project_paths,
-    get_project,
-    list_projects,
-    project_dir,
-    review_signature,
-    save_corrected_transcript,
-    save_project,
-)
-from reviewer import review_transcript
+import events
+import pipeline
+import session_store as store
+from reviewer import apply_to_text
 from settings_store import load_env_file, load_settings, openai_ready, save_settings, update_env_key
-from stt_engine import ALLOWED_EXTENSIONS, MODEL_OPTIONS, get_model_statuses
-from transcription_jobs import get_job, job_snapshot, start_transcription_job, stop_job
+from stt_engine import (
+    ALLOWED_AUDIO_EXTENSIONS,
+    ALLOWED_TEXT_EXTENSIONS,
+    MODEL_OPTIONS,
+    get_model_statuses,
+    to_srt,
+    to_txt,
+    to_vtt,
+)
 
 load_env_file()
 
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATES_DIR = BASE_DIR / "templates"
-
-app = FastAPI(title="STT Wizard", version="0.2.0")
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
-def test_openai_api_key(api_key: str | None = None) -> dict[str, object]:
-    candidate = (api_key or os.getenv("OPENAI_API_KEY", "")).strip()
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    store.recover_interrupted_sessions()
+    pipeline.start_workers()
+    yield
+
+
+app = FastAPI(title="STT Wizard", version="0.3.0", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+
+def require_session(session_id: str) -> dict[str, Any]:
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    return session
+
+
+def require_idle(session: dict[str, Any]) -> None:
+    if pipeline.is_busy(session):
+        raise HTTPException(status_code=409, detail="Wait for the current step to finish (or stop it) first.")
+
+
+def session_response(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    events.publish(session_id, "session", store.public_view(session))
+    return JSONResponse(store.public_view(session))
+
+
+def name_from_file(file_name: str) -> str:
+    stem = Path(file_name).stem.replace("_", " ").replace("-", " ").strip()
+    return " ".join(word[:1].upper() + word[1:] for word in stem.split()[:8]) or "New session"
+
+
+def public_settings() -> dict[str, Any]:
+    return {**load_settings(), "api_key_configured": openai_ready()}
+
+
+# ── Pages ──────────────────────────────────────────────────────────────────
+
+
+@app.get("/")
+def index() -> RedirectResponse:
+    sessions = store.list_sessions()
+    target = sessions[0]["id"] if sessions else store.create_session()["id"]
+    return RedirectResponse(url=f"/sessions/{target}", status_code=303)
+
+
+@app.get("/sessions/{session_id}", response_class=HTMLResponse)
+def session_page(request: Request, session_id: str) -> HTMLResponse:
+    session = store.get_session(session_id)
+    if not session:
+        return RedirectResponse(url="/", status_code=303)
+    bootstrap = {
+        "session": store.public_view(session),
+        "sessions": store.list_sessions(),
+        "settings": public_settings(),
+        "models": get_model_statuses(),
+        "audio_extensions": sorted(ALLOWED_AUDIO_EXTENSIONS),
+        "text_extensions": sorted(ALLOWED_TEXT_EXTENSIONS),
+    }
+    return templates.TemplateResponse(
+        request,
+        "session.html",
+        {"session": session, "bootstrap_json": json.dumps(bootstrap, ensure_ascii=False).replace("</", "<\\/")},
+    )
+
+
+# ── Sessions ───────────────────────────────────────────────────────────────
+
+
+@app.get("/api/sessions")
+def api_list_sessions() -> list[dict[str, Any]]:
+    return store.list_sessions()
+
+
+@app.post("/api/sessions")
+def api_create_session(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip() or "New session"
+    return store.public_view(store.create_session(name))
+
+
+@app.get("/api/sessions/{session_id}")
+def api_get_session(session_id: str) -> dict[str, Any]:
+    return store.public_view(require_session(session_id))
+
+
+@app.patch("/api/sessions/{session_id}")
+def api_update_session(session_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    require_session(session_id)
+    with store.edit(session_id) as live:
+        if "name" in payload and str(payload["name"]).strip():
+            live["name"] = str(payload["name"]).strip()[:120]
+            live["user_renamed"] = True
+        if "glossary" in payload:
+            live["glossary"] = str(payload["glossary"])[:4000]
+    return session_response(session_id)
+
+
+@app.delete("/api/sessions/{session_id}")
+def api_delete_session(session_id: str) -> dict[str, Any]:
+    session = require_session(session_id)
+    if session.get("status") == "transcribing":
+        pipeline.stop(session_id)
+    store.delete_session(session_id)
+    return {"ok": True}
+
+
+@app.get("/api/sessions/{session_id}/events")
+async def api_session_events(request: Request, session_id: str) -> StreamingResponse:
+    require_session(session_id)
+    queue = events.subscribe(session_id)
+
+    async def stream():
+        try:
+            session = store.get_session(session_id)
+            if session:
+                yield f"event: session\ndata: {json.dumps(store.public_view(session), ensure_ascii=False)}\n\n"
+            while not await request.is_disconnected():
+                try:
+                    event, data = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        finally:
+            events.unsubscribe(session_id, queue)
+
+    return StreamingResponse(
+        stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
+
+
+# ── Input: audio upload or transcript import ───────────────────────────────
+
+
+@app.post("/api/sessions/{session_id}/upload")
+def api_upload(session_id: str, file: UploadFile = File(...)) -> JSONResponse:
+    session = require_session(session_id)
+    require_idle(session)
+    original_name = Path(file.filename or "audio").name
+    suffix = Path(original_name).suffix.lower()
+
+    if suffix in ALLOWED_TEXT_EXTENSIONS:
+        return import_transcript(session_id, original_name, file)
+    if suffix not in ALLOWED_AUDIO_EXTENSIONS:
+        allowed = ", ".join(sorted(ALLOWED_AUDIO_EXTENSIONS | ALLOWED_TEXT_EXTENSIONS))
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Use one of: {allowed}.")
+
+    folder = store.audio_dir(session_id)
+    stored_name = f"{uuid.uuid4().hex[:8]}{suffix}"
+    with (folder / stored_name).open("wb") as target:
+        shutil.copyfileobj(file.file, target, length=1024 * 1024)
+
+    previous = (session.get("audio") or {}).get("file")
+    with store.edit(session_id) as live:
+        live["audio"] = {
+            "file": stored_name,
+            "original_name": original_name,
+            "kind": "upload",
+            "size": (folder / stored_name).stat().st_size,
+            "duration": None,
+            "added_at": store.now_iso(),
+        }
+        live["transcript"] = None
+        live["review"] = None
+        live["analysis"] = None
+        live["status"] = "idle"
+        live["error"] = None
+        if not live.get("user_renamed"):
+            live["name"] = name_from_file(original_name)
+    if previous and previous != stored_name:
+        (folder / previous).unlink(missing_ok=True)
+    return session_response(session_id)
+
+
+def import_transcript(session_id: str, original_name: str, file: UploadFile) -> JSONResponse:
+    content = file.file.read().decode("utf-8", errors="replace")
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines:
+        raise HTTPException(status_code=400, detail="The transcript file is empty.")
+    segments = [
+        {"id": f"s{index:05}", "start": None, "end": None, "text": line, "original_text": line, "speaker": None}
+        for index, line in enumerate(lines, start=1)
+    ]
+    with store.edit(session_id) as live:
+        live["audio"] = None
+        live["transcript"] = {
+            "source": "import",
+            "model": "Imported text",
+            "language": "",
+            "source_file": original_name,
+            "started_at": store.now_iso(),
+            "completed_at": store.now_iso(),
+            "stopped": False,
+            "segments": segments,
+        }
+        live["review"] = None
+        live["analysis"] = None
+        live["status"] = "ready"
+        live["error"] = None
+        if not live.get("user_renamed"):
+            live["name"] = name_from_file(original_name)
+    return session_response(session_id)
+
+
+@app.get("/api/sessions/{session_id}/audio")
+def api_audio(session_id: str) -> FileResponse:
+    session = require_session(session_id)
+    audio = session.get("audio")
+    if not audio:
+        raise HTTPException(status_code=404, detail="No audio in this session.")
+    path = store.audio_dir(session_id) / audio["file"]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Audio file is missing.")
+    return FileResponse(path, filename=audio.get("original_name") or path.name)
+
+
+# ── Pipeline actions ───────────────────────────────────────────────────────
+
+
+@app.post("/api/sessions/{session_id}/transcribe")
+def api_transcribe(session_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    session = require_session(session_id)
+    require_idle(session)
+    settings = load_settings()
+    model = str(payload.get("model") or settings.get("default_model") or "turbo")
+    if model not in MODEL_OPTIONS:
+        raise HTTPException(status_code=400, detail="Unknown model.")
+    task = "translate" if payload.get("task") == "translate" else "transcribe"
+    options = {
+        "model": model,
+        "language": str(payload.get("language") or "").strip().lower(),
+        "task": task,
+        "accurate": bool(payload.get("accurate", settings.get("accurate_decoding", True))),
+        "glossary": pipeline.effective_glossary(session),
+    }
+    try:
+        pipeline.start_transcription(session_id, options)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(store.public_view(require_session(session_id)))
+
+
+@app.post("/api/sessions/{session_id}/stop")
+def api_stop(session_id: str) -> dict[str, Any]:
+    require_session(session_id)
+    pipeline.stop(session_id)
+    return {"ok": True}
+
+
+@app.post("/api/sessions/{session_id}/review")
+def api_review(session_id: str) -> JSONResponse:
+    require_session(session_id)
+    if not openai_ready():
+        raise HTTPException(status_code=400, detail="Review needs an OpenAI API key. Add it in Settings.")
+    try:
+        pipeline.start_review(session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(store.public_view(require_session(session_id)))
+
+
+@app.post("/api/sessions/{session_id}/analysis")
+def api_analysis(session_id: str) -> JSONResponse:
+    require_session(session_id)
+    try:
+        pipeline.start_analysis(session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(store.public_view(require_session(session_id)))
+
+
+# ── Editing ────────────────────────────────────────────────────────────────
+
+
+@app.patch("/api/sessions/{session_id}/segments/{segment_id}")
+def api_edit_segment(session_id: str, segment_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    require_session(session_id)
+    text = str(payload.get("text", "")).strip()
+    with store.edit(session_id) as live:
+        segments = (live.get("transcript") or {}).get("segments") or []
+        segment = next((seg for seg in segments if seg["id"] == segment_id), None)
+        if not segment:
+            raise HTTPException(status_code=404, detail="Line not found.")
+        segment["text"] = text
+        result = dict(segment)
+    events.publish(session_id, "segment", result)
+    return JSONResponse(result)
+
+
+@app.post("/api/sessions/{session_id}/suggestions/{suggestion_id}")
+def api_suggestion_action(session_id: str, suggestion_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    session = require_session(session_id)
+    if session.get("status") == "reviewing":
+        raise HTTPException(status_code=409, detail="Wait for the review to finish.")
+    action = payload.get("action")
+    with store.edit(session_id) as live:
+        review = live.get("review") or {}
+        suggestion = next((item for item in review.get("suggestions", []) if item["id"] == suggestion_id), None)
+        if not suggestion:
+            raise HTTPException(status_code=404, detail="Suggestion not found.")
+        if action == "apply":
+            ok = _apply(live, suggestion, str(payload.get("replacement") or suggestion["suggested"]))
+            if not ok:
+                raise HTTPException(status_code=409, detail="The original text is no longer in that line (it was edited).")
+        elif action == "dismiss":
+            suggestion["status"] = "dismissed"
+            signatures = set(live.get("dismissed_signatures") or [])
+            signatures.add(store.review_signature(suggestion))
+            live["dismissed_signatures"] = sorted(signatures)
+        elif action == "revert":
+            if suggestion["status"] == "applied":
+                segments = (live.get("transcript") or {}).get("segments") or []
+                segment = next((seg for seg in segments if seg["id"] == suggestion["segment_id"]), None)
+                reverted = apply_to_text(segment["text"], suggestion.get("applied", ""), suggestion["original"]) if segment else None
+                if reverted is None:
+                    raise HTTPException(status_code=409, detail="That line was edited since; undo it by hand.")
+                segment["text"] = reverted
+            suggestion["status"] = "pending"
+            suggestion.pop("applied", None)
+        elif action == "reopen":
+            suggestion["status"] = "pending"
+            signatures = set(live.get("dismissed_signatures") or [])
+            signatures.discard(store.review_signature(suggestion))
+            live["dismissed_signatures"] = sorted(signatures)
+        else:
+            raise HTTPException(status_code=400, detail="Unknown action.")
+    return session_response(session_id)
+
+
+@app.post("/api/sessions/{session_id}/suggestions-apply-all")
+def api_apply_all(session_id: str) -> JSONResponse:
+    session = require_session(session_id)
+    require_idle(session)
+    with store.edit(session_id) as live:
+        for suggestion in (live.get("review") or {}).get("suggestions", []):
+            if suggestion["status"] == "pending":
+                _apply(live, suggestion, suggestion["suggested"])
+    return session_response(session_id)
+
+
+def _apply(live: dict[str, Any], suggestion: dict[str, Any], replacement: str) -> bool:
+    segments = (live.get("transcript") or {}).get("segments") or []
+    segment = next((seg for seg in segments if seg["id"] == suggestion["segment_id"]), None)
+    updated = apply_to_text(segment["text"], suggestion["original"], replacement) if segment else None
+    if updated is None:
+        suggestion["status"] = "stale"
+        return False
+    segment["text"] = updated
+    suggestion["status"] = "applied"
+    suggestion["applied"] = replacement
+    return True
+
+
+# ── Export ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/sessions/{session_id}/export")
+def api_export(session_id: str, format: str = "txt", version: str = "corrected") -> PlainTextResponse:
+    session = require_session(session_id)
+    transcript = session.get("transcript") or {}
+    segments = transcript.get("segments") or []
+    if not segments:
+        raise HTTPException(status_code=404, detail="Nothing to export yet.")
+    field = "original_text" if version == "original" else "text"
+    timed = transcript.get("source") != "import"
+    base = f"{session['name']} ({'original' if version == 'original' else 'corrected'})"
+
+    if format == "txt":
+        body, media = to_txt(segments, field), "text/plain"
+    elif format == "srt" and timed:
+        body, media = to_srt(segments, field), "application/x-subrip"
+    elif format == "vtt" and timed:
+        body, media = to_vtt(segments, field), "text/vtt"
+    elif format == "json":
+        payload = {
+            "name": session["name"],
+            "language": transcript.get("language"),
+            "model": transcript.get("model"),
+            "segments": [
+                {"start": seg["start"], "end": seg["end"], "speaker": seg.get("speaker"), "text": seg.get(field, "")}
+                for seg in segments
+            ],
+        }
+        if session.get("analysis"):
+            payload["analysis"] = session["analysis"]
+        body, media = json.dumps(payload, indent=2, ensure_ascii=False), "application/json"
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported export format for this transcript.")
+
+    safe = "".join(ch for ch in base if ch.isalnum() or ch in " ()-_").strip() or "transcript"
+    return PlainTextResponse(
+        body,
+        media_type=f"{media}; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{requests.utils.quote(safe)}.{format}"},
+    )
+
+
+# ── Settings ───────────────────────────────────────────────────────────────
+
+
+@app.get("/api/settings")
+def api_get_settings() -> dict[str, Any]:
+    return public_settings()
+
+
+@app.post("/api/settings")
+def api_save_settings(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    current = load_settings()
+    allowed = {
+        "review_model": str,
+        "analysis_model": str,
+        "auto_review": bool,
+        "auto_analysis": bool,
+        "default_glossary": str,
+        "default_model": str,
+        "default_language": str,
+        "accurate_decoding": bool,
+    }
+    for key, kind in allowed.items():
+        if key in payload:
+            current[key] = kind(payload[key])
+    if current.get("default_model") not in MODEL_OPTIONS:
+        current["default_model"] = "turbo"
+    save_settings(current)
+    if str(payload.get("openai_api_key") or "").strip():
+        update_env_key("OPENAI_API_KEY", str(payload["openai_api_key"]))
+    update_env_key("STT_REVIEW_MODEL", str(current["review_model"]))
+    update_env_key("STT_ANALYSIS_MODEL", str(current["analysis_model"]))
+    return public_settings()
+
+
+@app.post("/api/settings/glossary-term")
+def api_add_glossary_term(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    term = str(payload.get("term", "")).strip()
+    if not term:
+        raise HTTPException(status_code=400, detail="Empty term.")
+    settings = load_settings()
+    lines = [line.strip() for line in str(settings.get("default_glossary", "")).splitlines() if line.strip()]
+    if term.lower() not in {line.lower() for line in lines}:
+        lines.append(term)
+    settings["default_glossary"] = "\n".join(lines)
+    save_settings(settings)
+    return public_settings()
+
+
+@app.post("/api/settings/test-key")
+def api_test_key(payload: dict[str, Any] = Body(default={})) -> dict[str, Any]:
+    candidate = (str(payload.get("openai_api_key") or "") or os.getenv("OPENAI_API_KEY", "")).strip()
     if not candidate:
         return {"ok": False, "message": "No OpenAI API key is configured yet."}
     try:
         response = requests.get(
-            "https://api.openai.com/v1/models",
-            headers={"Authorization": f"Bearer {candidate}"},
-            timeout=15,
+            "https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {candidate}"}, timeout=15
         )
     except requests.RequestException as exc:
         return {"ok": False, "message": f"Could not reach OpenAI: {exc}"}
     if response.ok:
-        return {"ok": True, "message": "OpenAI API key works. Review and Analysis are enabled."}
-    return {
-        "ok": False,
-        "message": f"OpenAI rejected the key: HTTP {response.status_code}.",
-    }
-
-
-def default_project_name(file_name: str) -> str:
-    stem = Path(file_name).stem.replace("_", " ").replace("-", " ").strip()
-    if not stem:
-        return "New Transcript"
-    return " ".join(word.capitalize() for word in stem.split()[:6])
-
-
-def active_transcript_text(project: dict[str, object] | None) -> str:
-    if not project:
-        return ""
-    corrected = project.get("corrected_transcript")
-    if isinstance(corrected, dict):
-        return str(corrected.get("text", ""))
-    transcript = project.get("transcript")
-    if isinstance(transcript, dict):
-        return str(transcript.get("text", ""))
-    return ""
-
-
-def normalize_transcript_artifacts(project: dict[str, object] | None) -> bool:
-    if not project:
-        return False
-    transcript = project.get("transcript")
-    if not isinstance(transcript, dict):
-        return False
-    job_id = transcript.get("job_id")
-    if not job_id:
-        return False
-    expected = {
-        "txt": f"/projects/{project['id']}/download/{job_id}/txt",
-        "srt": f"/projects/{project['id']}/download/{job_id}/srt",
-        "vtt": f"/projects/{project['id']}/download/{job_id}/vtt",
-        "json": f"/projects/{project['id']}/download/{job_id}/json",
-    }
-    current = transcript.get("artifacts")
-    if current == expected:
-        return False
-    transcript["artifacts"] = expected
-    return True
-
-
-def normalize_project_runtime_state(project: dict[str, object] | None) -> bool:
-    if not project:
-        return False
-    changed = False
-    active_job_id = project.get("active_job_id")
-    active_job = get_job(str(active_job_id)) if active_job_id else None
-    if active_job_id and not active_job:
-        project.pop("active_job_id", None)
-        changed = True
-    if project.get("status") == "transcribing" and not active_job:
-        transcript = project.get("transcript")
-        if isinstance(transcript, dict) and transcript.get("text"):
-            project["status"] = "transcript_ready"
-        else:
-            project["status"] = "draft"
-        changed = True
-    return changed
-
-
-def resolve_active_job(project: dict[str, object] | None) -> dict[str, object] | None:
-    if not project:
-        return None
-    active_job_id = project.get("active_job_id")
-    if not active_job_id:
-        return None
-
-    changed = False
-    job = get_job(str(active_job_id))
-    terminal_states = {"completed", "failed", "stopped"}
-    if project.get("status") != "transcribing":
-        project.pop("active_job_id", None)
-        save_project(project)
-        return None
-    if not job:
-        project.pop("active_job_id", None)
-        if project.get("status") == "transcribing":
-            transcript = project.get("transcript")
-            if isinstance(transcript, dict) and transcript.get("text"):
-                project["status"] = "transcript_ready"
-            else:
-                project["status"] = "draft"
-        changed = True
-    else:
-        status = str(job.get("status", "queued"))
-        if status in terminal_states:
-            project.pop("active_job_id", None)
-            if project.get("status") == "transcribing":
-                transcript = project.get("transcript")
-                if isinstance(transcript, dict) and transcript.get("text"):
-                    project["status"] = "transcript_ready"
-                elif status == "failed":
-                    project["status"] = "failed"
-                else:
-                    project["status"] = "draft"
-            changed = True
-            job = None
-
-    if changed:
-        save_project(project)
-    return job
-
-
-def should_show_job_banner(project: dict[str, object] | None, job: dict[str, object] | None) -> bool:
-    if not project or not job:
-        return False
-    if project.get("status") != "transcribing":
-        return False
-    if not project.get("active_job_id"):
-        return False
-    return bool(job.get("is_active"))
-
-
-def materialize_transcript_artifact(project_id: str, job_id: str, artifact: str) -> Path | None:
-    project = get_project(project_id)
-    if not project:
-        return None
-    transcript = project.get("transcript")
-    if not isinstance(transcript, dict) or str(transcript.get("job_id")) != job_id:
-        return None
-
-    target_dir = ensure_project_paths(project_id)["outputs"] / job_id
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"transcript.{artifact}"
-
-    if artifact == "txt":
-        target.write_text(str(transcript.get("text", "")).strip() + "\n", encoding="utf-8")
-        return target
-    if artifact == "json":
-        target.write_text(json.dumps(transcript, indent=2, ensure_ascii=False), encoding="utf-8")
-        return target
-    if artifact == "srt":
-        target.write_text("", encoding="utf-8")
-        return target
-    if artifact == "vtt":
-        target.write_text("WEBVTT\n", encoding="utf-8")
-        return target
-    return None
-
-
-def materialize_corrected_artifact(project_id: str, artifact: str) -> Path | None:
-    project = get_project(project_id)
-    if not project:
-        return None
-    text = active_transcript_text(project).strip()
-    if not text:
-        return None
-
-    paths = ensure_project_paths(project_id)
-    target = paths["corrected"] / f"corrected_transcript.{artifact}"
-    if artifact == "txt":
-        target.write_text(text + "\n", encoding="utf-8")
-        return target
-    if artifact == "json":
-        target.write_text(json.dumps({"text": text}, indent=2, ensure_ascii=False), encoding="utf-8")
-        return target
-    return None
-
-
-def build_context(
-    request: Request,
-    project: dict[str, object] | None,
-    active_tab: str = "transcript",
-    error: str | None = None,
-    success: str | None = None,
-) -> dict[str, object]:
-    active_job: dict[str, object] | None = None
-    if project:
-        changed = False
-        if normalize_transcript_artifacts(project):
-            changed = True
-        if normalize_project_runtime_state(project):
-            changed = True
-        if changed:
-            save_project(project)
-        active_job_state = resolve_active_job(project)
-        active_job = job_snapshot(active_job_state, project)
-    show_job_banner = should_show_job_banner(project, active_job)
-    return {
-        "request": request,
-        "projects": list_projects(),
-        "project": project,
-        "active_tab": active_tab,
-        "models": get_model_statuses(),
-        "allowed_extensions": ", ".join(sorted(ALLOWED_EXTENSIONS)),
-        "settings": load_settings(),
-        "api_key_configured": openai_ready(),
-        "active_transcript_text": active_transcript_text(project),
-        "active_job": active_job,
-        "show_job_banner": show_job_banner,
-        "error": error,
-        "success": success,
-    }
-
-
-def render_workspace(
-    request: Request,
-    project: dict[str, object] | None,
-    active_tab: str = "transcript",
-    error: str | None = None,
-    success: str | None = None,
-    status_code: int = 200,
-) -> HTMLResponse:
-    return templates.TemplateResponse(
-        "workspace.html",
-        build_context(request, project, active_tab, error, success),
-        status_code=status_code,
-    )
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index() -> RedirectResponse:
-    projects = list_projects()
-    selected = projects[0] if projects else create_project()
-    return RedirectResponse(url=f"/projects/{selected['id']}?tab=transcript", status_code=303)
-
-
-@app.post("/projects")
-async def new_project(name: str = Form("New Transcript")) -> RedirectResponse:
-    project = create_project(name=name.strip() or "New Transcript")
-    return RedirectResponse(url=f"/projects/{project['id']}?tab=transcript", status_code=303)
-
-
-@app.post("/projects/{project_id}/rename")
-async def rename_project(project_id: str, name: str = Form(...)) -> RedirectResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    project["name"] = name.strip() or project["name"]
-    project["user_renamed"] = True
-    save_project(project)
-    return RedirectResponse(url=f"/projects/{project_id}?tab=transcript", status_code=303)
-
-
-@app.post("/projects/{project_id}/delete")
-async def remove_project(project_id: str) -> RedirectResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    delete_project(project_id)
-    projects = list_projects()
-    if projects:
-        return RedirectResponse(url=f"/projects/{projects[0]['id']}?tab=transcript", status_code=303)
-    new_item = create_project()
-    return RedirectResponse(url=f"/projects/{new_item['id']}?tab=transcript", status_code=303)
-
-
-@app.post("/settings")
-async def update_settings(
-    project_id: str = Form(...),
-    active_tab: str = Form("transcript"),
-    review_model: str = Form("gpt-5-mini"),
-    analysis_model: str = Form("gpt-5-mini"),
-    auto_review: str = Form("false"),
-    auto_analysis: str = Form("false"),
-    openai_api_key: str = Form(""),
-) -> RedirectResponse:
-    save_settings(
-        {
-            "review_model": review_model,
-            "analysis_model": analysis_model,
-            "auto_review": auto_review == "true",
-            "auto_analysis": auto_analysis == "true",
-        }
-    )
-    if openai_api_key.strip():
-        update_env_key("OPENAI_API_KEY", openai_api_key)
-    update_env_key("STT_REVIEW_MODEL", review_model)
-    update_env_key("STT_ANALYSIS_MODEL", analysis_model)
-    return RedirectResponse(url=f"/projects/{project_id}?tab={active_tab}", status_code=303)
-
-
-@app.post("/settings/test-openai-key")
-async def test_settings_openai_key(openai_api_key: str = Form("")) -> JSONResponse:
-    return JSONResponse(test_openai_api_key(openai_api_key or None))
-
-
-@app.get("/projects/{project_id}", response_class=HTMLResponse)
-async def project_workspace(request: Request, project_id: str, tab: str = "transcript") -> HTMLResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    return render_workspace(request, project=project, active_tab=tab)
-
-
-@app.post("/projects/{project_id}/transcribe")
-async def run_transcription(
-    project_id: str,
-    file: UploadFile = File(...),
-    model: str = Form("turbo"),
-    language: str = Form(""),
-    task: str = Form("transcribe"),
-    temperature: float = Form(0.0),
-    word_timestamps: str = Form("true"),
-) -> JSONResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    if model not in MODEL_OPTIONS:
-        return JSONResponse({"detail": "Unknown model selection."}, status_code=400)
-
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        return JSONResponse(
-            {"detail": f"Unsupported file type. Use one of: {', '.join(sorted(ALLOWED_EXTENSIONS))}."},
-            status_code=400,
-        )
-
-    paths = ensure_project_paths(project_id)
-    safe_name = Path(file.filename or f"audio{suffix}").name
-    input_path = paths["audio"] / f"{uuid.uuid4().hex[:8]}-{safe_name}"
-    with input_path.open("wb") as buffer:
-        while chunk := await file.read(1024 * 1024):
-            buffer.write(chunk)
-
-    if not project.get("user_renamed"):
-        project["name"] = default_project_name(safe_name)
-    save_project(project)
-    job_state = start_transcription_job(
-        project_id=project_id,
-        audio_path=input_path,
-        source_file=safe_name,
-        model_name=model,
-        language=language or None,
-        task=task,
-        temperature=temperature,
-        word_timestamps=word_timestamps == "true",
-    )
-    project = get_project(project_id)
-    snapshot = job_snapshot(job_state, project) or {}
-    return JSONResponse(
-        {
-            "job_id": job_state["job_id"],
-            "project_id": project_id,
-            "redirect_url": f"/projects/{project_id}?tab=transcript",
-            "progress": snapshot,
-        }
-    )
-
-
-@app.get("/projects/{project_id}/jobs/{job_id}")
-async def job_status(project_id: str, job_id: str) -> JSONResponse:
-    state = get_job(job_id)
-    if not state or state["project_id"] != project_id:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    project = get_project(project_id)
-    snapshot = job_snapshot(state, project)
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    return JSONResponse(snapshot)
-
-
-@app.post("/projects/{project_id}/jobs/{job_id}/stop")
-async def stop_transcription(project_id: str, job_id: str) -> JSONResponse:
-    project = get_project(project_id)
-    state = stop_job(job_id)
-    if not state or state["project_id"] != project_id:
-        if project and project.get("active_job_id") == job_id:
-            project["status"] = "stopped"
-            project.pop("active_job_id", None)
-            save_project(project)
-            return JSONResponse({"ok": True, "progress": {"status": "stopped", "is_active": False}})
-        raise HTTPException(status_code=404, detail="Job not found.")
-    if project and project.get("active_job_id") == job_id:
-        project["status"] = "stopped"
-        project.pop("active_job_id", None)
-        save_project(project)
-    return JSONResponse({"ok": True, "progress": job_snapshot(state, project)})
-
-
-@app.post("/projects/{project_id}/review/import", response_class=HTMLResponse)
-async def import_review_text(
-    request: Request,
-    project_id: str,
-    transcript_file: UploadFile = File(...),
-) -> HTMLResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    suffix = Path(transcript_file.filename or "").suffix.lower()
-    if suffix not in {".txt", ".md"}:
-        return render_workspace(
-            request,
-            project,
-            active_tab="review",
-            error="Use a .txt or .md transcript file for review import.",
-            status_code=400,
-        )
-    content = (await transcript_file.read()).decode("utf-8", errors="replace").strip()
-    if not content:
-        return render_workspace(
-            request,
-            project,
-            active_tab="review",
-            error="The uploaded transcript file was empty.",
-            status_code=400,
-        )
-    paths = ensure_project_paths(project_id)
-    import_path = paths["review"] / f"imported-{Path(transcript_file.filename or 'transcript.txt').name}"
-    import_path.write_text(content, encoding="utf-8")
-    project["source_file"] = Path(transcript_file.filename or "Imported Transcript").name
-    if not project.get("user_renamed"):
-        project["name"] = default_project_name(project["source_file"])
-    project["transcript"] = {
-        "job_id": "imported-text",
-        "job_dir": str(paths["review"]),
-        "device": "n/a",
-        "model": "Imported Text",
-        "language": "text",
-        "task": "review-only",
-        "text": content,
-        "segments": [],
-        "source_file": project["source_file"],
-        "source_path": str(import_path),
-        "artifacts": {},
-        "imported": True,
-    }
-    project["corrected_transcript"] = {
-        "text": content,
-        "saved_files": save_corrected_transcript(project_id, content),
-    }
-    project["review"] = None
-    project["analysis"] = None
-    project["status"] = "transcript_ready"
-    save_project(project)
-    return render_workspace(
-        request,
-        project,
-        active_tab="review",
-        success="Transcript text imported. You can run review immediately.",
-    )
-
-
-@app.post("/projects/{project_id}/review", response_class=HTMLResponse)
-async def run_review(request: Request, project_id: str) -> HTMLResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    text = active_transcript_text(project)
-    transcript = project.get("transcript")
-    if not text or not isinstance(transcript, dict):
-        return render_workspace(
-            request,
-            project,
-            active_tab="review",
-            error="Transcript is required before review can run.",
-            status_code=400,
-        )
-
-    project["status"] = "reviewing"
-    save_project(project)
-    try:
-        review = review_transcript(
-            text=text,
-            segments=transcript.get("segments", []),
-            language=str(transcript.get("language", "auto")),
-        )
-    except Exception as exc:
-        project["status"] = "failed"
-        save_project(project)
-        return render_workspace(
-            request,
-            project,
-            active_tab="review",
-            error=f"Review failed: {exc}",
-            status_code=500,
-        )
-    dismissed_signatures = set(project.get("dismissed_review_signatures", []) or [])
-    if dismissed_signatures:
-        review["suggestions"] = [
-            suggestion
-            for suggestion in review.get("suggestions", [])
-            if review_signature(suggestion) not in dismissed_signatures
-        ]
-        review["summary"] = (
-            f"{review['summary']} "
-            f"{len(dismissed_signatures)} dismissed finding(s) were hidden from this rerun."
-        ).strip()
-    project["review"] = review
-    project["status"] = "reviewed"
-    save_project(project)
-    return render_workspace(request, project, active_tab="review", success="Review finished.")
-
-
-@app.post("/projects/{project_id}/save-corrections", response_class=HTMLResponse)
-async def save_corrections(
-    request: Request,
-    project_id: str,
-    corrected_text: str = Form(...),
-) -> HTMLResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    project["corrected_transcript"] = {
-        "text": corrected_text,
-        "saved_files": save_corrected_transcript(project_id, corrected_text),
-    }
-    save_project(project)
-    return render_workspace(
-        request,
-        project,
-        active_tab="review",
-        success="Corrected transcript saved to the project folder.",
-    )
-
-
-@app.post("/projects/{project_id}/review-state")
-async def save_review_state(
-    project_id: str,
-    corrected_text: str = Form(...),
-    suggestions_json: str = Form("[]"),
-    dismissed_json: str = Form("[]"),
-) -> JSONResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    try:
-        suggestions = json.loads(suggestions_json)
-        dismissed = json.loads(dismissed_json)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid review payload: {exc}") from exc
-
-    project["corrected_transcript"] = {
-        "text": corrected_text,
-        "saved_files": save_corrected_transcript(project_id, corrected_text),
-    }
-    if isinstance(project.get("review"), dict):
-        project["review"]["suggestions"] = suggestions if isinstance(suggestions, list) else []
-    project["dismissed_review_signatures"] = dismissed if isinstance(dismissed, list) else []
-    save_project(project)
-    return JSONResponse({"ok": True})
-
-
-@app.post("/projects/{project_id}/analysis", response_class=HTMLResponse)
-async def run_analysis(request: Request, project_id: str) -> HTMLResponse:
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found.")
-    text = active_transcript_text(project)
-    if not text:
-        return render_workspace(
-            request,
-            project,
-            active_tab="analysis",
-            error="Transcript is required before analysis can run.",
-            status_code=400,
-        )
-
-    project["status"] = "analyzing"
-    save_project(project)
-    try:
-        analysis = analyze_transcript(text)
-    except Exception as exc:
-        project["status"] = "failed"
-        save_project(project)
-        return render_workspace(
-            request,
-            project,
-            active_tab="analysis",
-            error=f"Analysis failed: {exc}",
-            status_code=500,
-        )
-
-    analysis_path = ensure_project_paths(project_id)["analysis"] / "analysis.json"
-    analysis_path.write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8")
-    project["analysis"] = {**analysis, "saved_path": str(analysis_path)}
-    project["status"] = "analyzed"
-    save_project(project)
-    return render_workspace(request, project, active_tab="analysis", success="Analysis complete.")
-
-
-@app.get("/projects/{project_id}/download/{job_id}/{artifact}")
-async def download_artifact(project_id: str, job_id: str, artifact: str) -> FileResponse:
-    if job_id == "corrected":
-        return await download_corrected_artifact(project_id, artifact)
-    if job_id == "analysis":
-        return await download_analysis_artifact(project_id, artifact)
-
-    allowed_artifacts = {"txt", "srt", "vtt", "json"}
-    if artifact not in allowed_artifacts:
-        raise HTTPException(status_code=404, detail="Unknown artifact.")
-    target = project_dir(project_id) / "outputs" / job_id / f"transcript.{artifact}"
-    if not target.exists():
-        target = materialize_transcript_artifact(project_id, job_id, artifact)
-    if not target or not target.exists():
-        raise HTTPException(status_code=404, detail="Artifact not found.")
-    media_type = {
-        "txt": "text/plain",
-        "srt": "application/x-subrip",
-        "vtt": "text/vtt",
-        "json": "application/json",
-    }[artifact]
-    return FileResponse(target, filename=target.name, media_type=media_type)
-
-
-@app.get("/projects/{project_id}/download/corrected/{artifact}")
-async def download_corrected_artifact(project_id: str, artifact: str) -> FileResponse:
-    if artifact not in {"txt", "json"}:
-        raise HTTPException(status_code=404, detail="Unknown corrected artifact.")
-    target = project_dir(project_id) / "corrected" / f"corrected_transcript.{artifact}"
-    if not target.exists():
-        target = materialize_corrected_artifact(project_id, artifact)
-    if not target or not target.exists():
-        raise HTTPException(status_code=404, detail="Corrected artifact not found.")
-    media_type = {
-        "txt": "text/plain",
-        "json": "application/json",
-    }[artifact]
-    return FileResponse(target, filename=target.name, media_type=media_type)
-
-
-@app.get("/projects/{project_id}/download/analysis/{artifact}")
-async def download_analysis_artifact(project_id: str, artifact: str) -> FileResponse:
-    if artifact != "json":
-        raise HTTPException(status_code=404, detail="Unknown analysis artifact.")
-    target = project_dir(project_id) / "analysis" / "analysis.json"
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="Analysis artifact not found.")
-    return FileResponse(target, filename=target.name, media_type="application/json")
+        return {"ok": True, "message": "The key works."}
+    return {"ok": False, "message": f"OpenAI rejected the key (HTTP {response.status_code})."}

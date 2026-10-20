@@ -1,157 +1,190 @@
+"""LLM review of a transcript, line by line.
+
+Each suggestion points at one transcript line (``segment_id``) and an exact
+substring of it, so applying it edits only that line.
+"""
+
 from __future__ import annotations
 
 import json
 import os
-from typing import Any
+import re
+import uuid
+from typing import Any, Callable
 
 import requests
 
+MAX_BATCH_CHARS = 12_000
+MAX_SUGGESTIONS_PER_BATCH = 40
 
-def review_transcript(
-    text: str,
+INSTRUCTIONS = (
+    "You review speech-to-text transcripts and return only JSON. "
+    "Each transcript line is prefixed with its id in square brackets. "
+    "Flag only words that are likely wrong in context: misheard names, acronyms, companies, systems, products, "
+    "technical terms, or clearly wrong word substitutions. Do not rewrite style, grammar or punctuation. "
+    "For each finding: 'segment_id' is the id of the line; 'original' is the exact text as it appears in that line "
+    "(copy it character for character, keep it short: just the wrong word or phrase); 'suggested' is only the "
+    "replacement text, with no alternatives or comments; 'justification' explains why, briefly, for the user. "
+    "When a glossary is provided, treat it as the authoritative spelling of names and terms and flag near-misses. "
+    "Return an empty suggestions array if nothing is likely wrong."
+)
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "suggestions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "segment_id": {"type": "string"},
+                    "original": {"type": "string"},
+                    "suggested": {"type": "string"},
+                    "justification": {"type": "string"},
+                },
+                "required": ["segment_id", "original", "suggested", "justification"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["suggestions"],
+    "additionalProperties": False,
+}
+
+
+def batch_segments(segments: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    size = 0
+    for segment in segments:
+        length = len(segment.get("text", "")) + 12
+        if current and size + length > MAX_BATCH_CHARS:
+            batches.append(current)
+            current, size = [], 0
+        current.append(segment)
+        size += length
+    if current:
+        batches.append(current)
+    return batches
+
+
+def review_segments(
     segments: list[dict[str, Any]],
     language: str,
+    glossary: str,
+    on_progress: Callable[[int, int], Any] | None = None,
 ) -> dict[str, Any]:
-    review = llm_review(text=text, segments=segments, language=language)
-    review["requested_mode"] = "llm"
-    review["executed_mode"] = "llm"
-    review["api_used"] = True
-    return review
-
-
-def llm_review(text: str, segments: list[dict[str, Any]], language: str) -> dict[str, Any]:
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured.")
-
+        raise RuntimeError("No OpenAI API key is configured. Add one in Settings.")
     model = os.getenv("STT_REVIEW_MODEL", "gpt-5-mini")
+
+    by_id = {seg["id"]: seg for seg in segments}
+    batches = batch_segments([seg for seg in segments if seg.get("text", "").strip()])
+    suggestions: list[dict[str, Any]] = []
+    discarded = 0
+    seen: set[tuple[str, str, str]] = set()
+
+    for index, batch in enumerate(batches, start=1):
+        if on_progress:
+            on_progress(index, len(batches))
+        raw = _call_llm(api_key, model, batch, language, glossary)
+        for item in raw[:MAX_SUGGESTIONS_PER_BATCH]:
+            segment = by_id.get(str(item.get("segment_id", "")).strip())
+            original = str(item.get("original", "")).strip()
+            suggested = str(item.get("suggested", "")).strip()
+            if not segment or not original or not suggested or original == suggested:
+                discarded += 1
+                continue
+            if find_span(segment["text"], original) is None:
+                discarded += 1
+                continue
+            key = (segment["id"], original.lower(), suggested.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            suggestions.append(
+                {
+                    "id": uuid.uuid4().hex[:8],
+                    "segment_id": segment["id"],
+                    "original": original,
+                    "suggested": suggested,
+                    "justification": str(item.get("justification", "")).strip(),
+                    "status": "pending",
+                }
+            )
+
+    return {
+        "model": model,
+        "created_at": None,
+        "batches": len(batches),
+        "discarded": discarded,
+        "glossary_used": bool(glossary.strip()),
+        "suggestions": suggestions,
+    }
+
+
+def _call_llm(api_key: str, model: str, batch: list[dict[str, Any]], language: str, glossary: str) -> list[dict[str, Any]]:
+    lines = "\n".join(f"[{seg['id']}] {seg['text'].strip()}" for seg in batch)
+    user_payload = {"language": language, "glossary": glossary.strip() or None, "transcript": lines}
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    review_payload = build_review_payload(text=text, segments=segments, language=language)
     response = requests.post(
         f"{base_url.rstrip('/')}/responses",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={
             "model": model,
             "input": [
-                {
-                    "role": "developer",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "Review speech-to-text transcripts and return only JSON. "
-                                "Flag only items likely to be wrong in context, such as misheard names, acronyms, systems, products, or technical terms. "
-                                "Do not rewrite the full transcript. "
-                                "For each finding, 'suggested' must contain only the proposed replacement text and nothing else. "
-                                "Do not put alternatives, explanations, uncertainty notes, punctuation advice, or comments inside 'suggested'. "
-                                "Put all rationale, caveats, and guidance for the user inside 'justification'. "
-                                "Return an empty suggestions array if there are no likely issues."
-                            ),
-                        }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": json.dumps(review_payload, ensure_ascii=False)}],
-                },
+                {"role": "developer", "content": [{"type": "input_text", "text": INSTRUCTIONS}]},
+                {"role": "user", "content": [{"type": "input_text", "text": json.dumps(user_payload, ensure_ascii=False)}]},
             ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "transcript_review",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "suggestions": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "original": {"type": "string"},
-                                        "suggested": {"type": "string"},
-                                        "justification": {"type": "string"},
-                                        "context": {"type": "string"},
-                                    },
-                                    "required": ["original", "suggested", "justification", "context"],
-                                    "additionalProperties": False,
-                                },
-                            }
-                        },
-                        "required": ["suggestions"],
-                        "additionalProperties": False,
-                    },
-                }
-            },
+            "text": {"format": {"type": "json_schema", "name": "transcript_review", "strict": True, "schema": SCHEMA}},
         },
         timeout=180,
     )
     if not response.ok:
         raise RuntimeError(extract_api_error(response))
-    payload = response.json()
-    content = extract_output_text(payload)
-    parsed = json.loads(content)
-    suggestions = parsed.get("suggestions", [])
-    for suggestion in suggestions:
-        suggestion.setdefault("suggested", suggestion.get("original", ""))
-        suggestion.setdefault("justification", "Review the context before applying this replacement.")
-        suggestion.setdefault("context", "")
-    return {
-        "mode": "llm",
-        "language": language,
-        "summary": f"LLM review using {model} flagged transcript items that may be wrong in context.",
-        "suggestions": suggestions[:25],
-    }
+    parsed = json.loads(extract_output_text(response.json()))
+    return parsed.get("suggestions", [])
 
 
-def build_review_payload(text: str, segments: list[dict[str, Any]], language: str) -> dict[str, Any]:
-    compact_segments = [
-        {
-            "start": round(segment.get("start", 0), 2),
-            "end": round(segment.get("end", 0), 2),
-            "text": segment.get("text", "").strip(),
-        }
-        for segment in segments[:80]
-    ]
-    return {
-        "language": language,
-        "instruction": (
-            "Find likely wrong words that do not make sense in context. Focus on names, acronyms, tools, systems, products, and odd substitutions. "
-            "Only return candidates that should be reviewed by a human. "
-            "Return a clean replacement suggestion in 'suggested' and put the user-facing explanation in 'justification'."
-        ),
-        "transcript": text,
-        "segments": compact_segments,
-    }
+def find_span(text: str, needle: str) -> tuple[int, int] | None:
+    """Locate ``needle`` in ``text``: exact first, then case-insensitive."""
+    index = text.find(needle)
+    if index >= 0:
+        return index, index + len(needle)
+    match = re.search(re.escape(needle), text, flags=re.IGNORECASE)
+    if match:
+        return match.start(), match.end()
+    return None
+
+
+def apply_to_text(text: str, original: str, replacement: str) -> str | None:
+    span = find_span(text, original)
+    if span is None:
+        return None
+    return text[: span[0]] + replacement + text[span[1] :]
 
 
 def extract_output_text(payload: dict[str, Any]) -> str:
     for item in payload.get("output", []):
-        for content in item.get("content", []):
-            text_value = content.get("text")
-            if isinstance(text_value, str) and text_value.strip():
-                return text_value
-    raise RuntimeError("No structured text output was returned by the Responses API.")
+        for content in item.get("content", []) or []:
+            value = content.get("text")
+            if isinstance(value, str) and value.strip():
+                return value
+    raise RuntimeError("The Responses API returned no structured output.")
 
 
 def extract_api_error(response: requests.Response) -> str:
     try:
         payload = response.json()
     except ValueError:
-        return f"{response.status_code} {response.reason}: {response.text.strip()}"
-
+        return f"{response.status_code} {response.reason}: {response.text.strip()[:300]}"
     error = payload.get("error", {})
     if isinstance(error, dict):
-        message = error.get("message") or payload
-        err_type = error.get("type")
-        err_param = error.get("param")
-        pieces = [str(message)]
-        if err_type:
-            pieces.append(f"type={err_type}")
-        if err_param:
-            pieces.append(f"param={err_param}")
+        pieces = [str(error.get("message") or payload)]
+        if error.get("type"):
+            pieces.append(f"type={error['type']}")
+        if error.get("param"):
+            pieces.append(f"param={error['param']}")
         return " | ".join(pieces)
     return str(payload)

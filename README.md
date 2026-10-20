@@ -30,35 +30,41 @@ RUN_STT_WIZARD.bat
 
 ## What Stays Local
 
-- Uploaded audio and project data are stored in `data/`.
-- App preferences are stored in `settings.json`.
+- Audio, transcripts, reviews and analyses are stored per session in `data/sessions/<id>/`.
+- App preferences (including the default glossary) are stored in `settings.json`.
 - The OpenAI API key is stored in `.env`.
 - Whisper models are downloaded to the normal Whisper cache, usually `%USERPROFILE%\.cache\whisper`, unless `WHISPER_MODEL_DIR` is configured.
 
-Audio transcription is local. OpenAI is only called for optional Review, Analysis, and key testing.
-
-## OpenAI Settings Flow
-
-Open the `Settings` tab.
-
-1. Paste an OpenAI API key.
-2. Click `Test OpenAI key`.
-3. If the test succeeds, click `Save settings`.
-4. Review and Analysis can then call OpenAI.
-
-Leaving the API key field blank keeps the existing saved key.
+Audio transcription is local. OpenAI is only called for Review, Analysis and key testing.
 
 ## Workflow
 
-1. Create or rename a project.
-2. Upload audio in `Transcript`.
-3. Choose a local Whisper model.
-4. Run transcription.
-5. Export original TXT/SRT/VTT/JSON if needed.
-6. Run Review for entity/term correction suggestions.
-7. Apply or dismiss suggestions.
-8. Save and export corrected TXT/JSON.
-9. Run Analysis for summary, key points, action items, and open questions.
+Everything happens on one page per session:
+
+1. Click `+ New session` and drop an audio file (or a `.txt` transcript to go straight to Review).
+2. Transcription starts right away with your default settings. Lines stream in as Whisper works.
+   Open `Transcription settings` to pick another model or language, turn on translation, or add a session glossary.
+3. When the transcript is done, Review runs automatically (if an OpenAI key is set and auto-review is on).
+   Suspicious words are highlighted in the transcript; apply, edit or dismiss each suggestion.
+4. Click a timestamp to play the audio from that line; click any line to edit it.
+5. Export the corrected or original transcript as TXT, SRT, VTT or JSON.
+6. Run Analysis for a summary, key points, action items and open questions.
+
+## Glossary
+
+Whisper is prompted with a glossary of names, acronyms and terms, which makes it spell them correctly far more often.
+The same glossary tells Review which spellings are authoritative.
+
+- `Settings → Default glossary`: terms used for every session (your company, team, recurring clients).
+- `Transcription settings → Glossary for this session`: terms for this recording only.
+- After applying a Review suggestion, `+ Glossary` adds the corrected term to the default glossary.
+
+Write one term per line. Whisper only reads about 150 words of prompt, so keep the hardest terms in.
+
+## OpenAI Settings
+
+Open `Settings` (bottom of the sidebar), paste an API key, click `Test key`, then `Save settings`.
+Leaving the key field blank keeps the existing saved key.
 
 ## Requirements
 
