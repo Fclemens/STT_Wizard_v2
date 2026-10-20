@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>STT Wizard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Local-first speech-to-text</p>
+        <h1>Whisper workstation for high-trust transcription.</h1>
+        <p class="lede">
+          Upload an audio file, pick the official Whisper model that fits your hardware, and keep every
+          transcription on your own machine.
+        </p>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <h2>Run transcription</h2>
+          <form action="/transcribe" method="post" enctype="multipart/form-data" class="form">
+            <label>
+              Audio file
+              <input type="file" name="file" accept=".mp3,.wav,.m4a,.mp4,.mpeg,.mpga,.webm" required />
+            </label>
+
+            <label>
+              Model
+              <select name="model">
+                {% for model_name, meta in models.items() %}
+                <option value="{{ model_name }}" {% if form_data.model == model_name %}selected{% endif %}>
+                  {{ model_name }} | {{ meta.speed }} | {{ meta.vram }}
+                </option>
+                {% endfor %}
+              </select>
+            </label>
+
+            <div class="row">
+              <label>
+                Language
+                <input
+                  type="text"
+                  name="language"
+                  placeholder="Auto-detect if empty"
+                  value="{{ form_data.language }}"
+                />
+              </label>
+
+              <label>
+                Task
+                <select name="task">
+                  <option value="transcribe" {% if form_data.task == "transcribe" %}selected{% endif %}>Transcribe</option>
+                  <option value="translate" {% if form_data.task == "translate" %}selected{% endif %}>Translate to English</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="row">
+              <label>
+                Temperature
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  name="temperature"
+                  value="{{ form_data.temperature }}"
+                />
+              </label>
+
+              <label>
+                Word timestamps
+                <select name="word_timestamps">
+                  <option value="true" {% if form_data.word_timestamps == "true" %}selected{% endif %}>Enabled</option>
+                  <option value="false" {% if form_data.word_timestamps == "false" %}selected{% endif %}>Disabled</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="row">
+              <label>
+                Review pass
+                <select name="run_review">
+                  <option value="true" {% if form_data.run_review == "true" %}selected{% endif %}>Flag suspicious terms</option>
+                  <option value="false" {% if form_data.run_review == "false" %}selected{% endif %}>Skip review</option>
+                </select>
+              </label>
+
+              <label>
+                Review mode
+                <select name="review_mode">
+                  <option value="heuristic" {% if form_data.review_mode == "heuristic" %}selected{% endif %}>Local heuristic</option>
+                  <option value="llm" {% if form_data.review_mode == "llm" %}selected{% endif %}>LLM API if configured</option>
+                </select>
+              </label>
+            </div>
+
+            <button type="submit">Transcribe locally</button>
+          </form>
+
+          <div id="progress-panel" class="progress-panel" hidden>
+            <div class="progress-labels">
+              <strong id="progress-title">Uploading audio</strong>
+              <span id="progress-message">Your file is being sent to the local Whisper pipeline.</span>
+            </div>
+            <div class="progress-bar" aria-hidden="true">
+              <div class="progress-bar-fill"></div>
+            </div>
+            <p class="progress-note">
+              Whisper runs locally, so longer files or larger models like <strong>large</strong> can take a while.
+            </p>
+          </div>
+
+          {% if error %}
+          <div class="notice error">{{ error }}</div>
+          {% endif %}
+
+          <div class="notice">
+            Supported inputs: {{ allowed_extensions }}. Whisper relies on local <code>ffmpeg</code> to decode audio.
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Model guide</h2>
+          <div class="model-list">
+            {% for model_name, meta in models.items() %}
+            <article class="model-card">
+              <div>
+                <div class="model-heading">
+                  <h3>{{ model_name }}</h3>
+                  <span class="model-status {% if meta.downloaded %}is-downloaded{% else %}needs-download{% endif %}">
+                    {{ meta.status_label }}
+                  </span>
+                </div>
+                <p>{{ meta.best_for }}</p>
+              </div>
+              <dl>
+                <div>
+                  <dt>Speed</dt>
+                  <dd>{{ meta.speed }}</dd>
+                </div>
+                <div>
+                  <dt>VRAM</dt>
+                  <dd>{{ meta.vram }}</dd>
+                </div>
+              </dl>
+              <p class="cache-path">
+                Cache path: <code>{{ meta.cache_path }}</code>
+              </p>
+            </article>
+            {% endfor %}
+          </div>
+        </div>
+      </section>
+
+      <section class="grid lower">
+        <div class="panel">
+          <h2>Workflow best practices</h2>
+          <ul class="best-practices">
+            <li>Use <strong>turbo</strong> for fast English transcripts and <strong>medium</strong> or <strong>large</strong> for multilingual or higher-stakes accuracy.</li>
+            <li>Keep audio as mono 16 kHz or 32 kHz WAV when possible to reduce decode issues and make results more consistent.</li>
+            <li>Split long recordings by speaker or meeting section so retries are cheap and QA is easier.</li>
+            <li>Export both <strong>TXT</strong> and <strong>SRT/VTT</strong> so you have a readable transcript and time-aligned captions.</li>
+            <li>Review named entities, acronyms, and numbers manually, especially in consulting, legal, or medical material.</li>
+            <li>For privacy-sensitive work, keep uploads and outputs in a dedicated local folder with retention rules.</li>
+          </ul>
+        </div>
+
+        <div class="panel result-panel">
+          <h2>Latest result</h2>
+          {% if result %}
+          <div class="result-meta">
+            <span>Model: {{ result.model }}</span>
+            <span>Detected language: {{ result.language }}</span>
+            <span>Device: {{ result.device }}</span>
+          </div>
+          <div class="output-location">
+            <strong>Saved locally:</strong>
+            <code>{{ result.job_dir }}</code>
+          </div>
+          <div class="downloads">
+            <a href="{{ result.artifacts.txt }}">TXT</a>
+            <a href="{{ result.artifacts.srt }}">SRT</a>
+            <a href="{{ result.artifacts.vtt }}">VTT</a>
+            <a href="{{ result.artifacts.json }}">JSON</a>
+          </div>
+          <div class="notice output-help">
+            The full transcript appears in the text box below, and the same outputs are also stored in the local folder shown above.
+          </div>
+          <textarea id="transcript-output" readonly>{{ result.text }}</textarea>
+          <details>
+            <summary>Segments JSON</summary>
+            <pre>{{ transcript_json }}</pre>
+          </details>
+          {% else %}
+          <p class="placeholder">
+            Run a job and your transcript, metadata, and downloadable artifacts will show up here.
+          </p>
+          {% endif %}
+        </div>
+      </section>
+
+      {% if review and result %}
+      <section class="panel review-panel">
+        <div class="review-header">
+          <div>
+            <h2>Review flow</h2>
+            <p>{{ review.summary }}</p>
+            {% if review.fallback_reason %}
+            <p class="fallback-note">LLM review was unavailable, so the app used local heuristics instead: {{ review.fallback_reason }}</p>
+            {% endif %}
+          </div>
+          <button type="button" id="apply-all">Apply all suggested edits</button>
+        </div>
+
+        {% if review.suggestions %}
+        <div class="review-list">
+          {% for suggestion in review.suggestions %}
+          <article class="review-card" data-original="{{ suggestion.original }}">
+            <div class="review-topline">
+              <strong>{{ suggestion.original }}</strong>
+              <span>{{ review.mode|upper }}</span>
+            </div>
+            <p class="review-context">{{ suggestion.context }}</p>
+            <div class="review-edit">
+              <label>
+                Replacement
+                <input
+                  type="text"
+                  class="replacement-input"
+                  value="{{ suggestion.suggested }}"
+                  data-original="{{ suggestion.original }}"
+                />
+              </label>
+              <button type="button" class="apply-one" data-original="{{ suggestion.original }}">Apply</button>
+            </div>
+            <ul class="review-reasons">
+              {% for reason in suggestion.reasons %}
+              <li>{{ reason }}</li>
+              {% endfor %}
+            </ul>
+          </article>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="placeholder">The review pass did not find any obviously suspicious terms in this transcript.</p>
+        {% endif %}
+      </section>
+      {% endif %}
+    </main>
+    <script>
+      const transcriptionForm = document.querySelector(".form");
+      const progressPanel = document.getElementById("progress-panel");
+      const progressTitle = document.getElementById("progress-title");
+      const progressMessage = document.getElementById("progress-message");
+      if (transcriptionForm && progressPanel) {
+        transcriptionForm.addEventListener("submit", () => {
+          const model = transcriptionForm.querySelector('select[name="model"]')?.value || "selected";
+          progressPanel.hidden = false;
+          progressTitle.textContent = "Running local transcription";
+          progressMessage.textContent = `Whisper is processing your audio with the ${model} model. Keep this page open until the result panel refreshes.`;
+        });
+      }
+
+      const transcriptOutput = document.getElementById("transcript-output");
+      if (transcriptOutput) {
+        const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const applyReplacement = (original, replacement) => {
+          if (!replacement || original === replacement) return;
+          const matcher = new RegExp(`\\b${escapeRegExp(original)}\\b`, "g");
+          transcriptOutput.value = transcriptOutput.value.replace(matcher, replacement);
+        };
+
+        document.querySelectorAll(".apply-one").forEach((button) => {
+          button.addEventListener("click", () => {
+            const original = button.dataset.original;
+            const input = button.parentElement.querySelector(".replacement-input");
+            applyReplacement(original, input.value.trim());
+          });
+        });
+
+        const applyAll = document.getElementById("apply-all");
+        if (applyAll) {
+          applyAll.addEventListener("click", () => {
+            document.querySelectorAll(".replacement-input").forEach((input) => {
+              applyReplacement(input.dataset.original, input.value.trim());
+            });
+          });
+        }
+      }
+    </script>
+  </body>
+</html>

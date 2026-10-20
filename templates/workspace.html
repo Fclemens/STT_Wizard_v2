@@ -1,0 +1,942 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% if project %}{{ project.name }} — {% endif %}STT Wizard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="workspace-shell">
+
+      <!-- ═══ SIDEBAR ══════════════════════════════════════════════════ -->
+      <aside class="sidebar panel">
+
+        <div class="sidebar-brand">
+          <div class="brand-mark">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="0.5" y="5" width="2" height="6" rx="1" fill="white"/>
+              <rect x="4" y="2.5" width="2" height="11" rx="1" fill="white"/>
+              <rect x="7.5" y="0.5" width="2" height="15" rx="1" fill="white"/>
+              <rect x="11" y="3.5" width="2" height="9" rx="1" fill="white"/>
+              <rect x="14.5" y="6" width="2" height="5" rx="1" fill="white"/>
+            </svg>
+          </div>
+          <span class="brand-name">STT Wizard</span>
+          <button type="button" class="new-project-toggle" id="new-project-toggle" aria-label="New project" title="New project">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="new-project-wrap" id="new-project-wrap" hidden>
+          <form action="/projects" method="post" class="new-project-form">
+            <input type="text" name="name" value="New Transcript" placeholder="Project name" />
+            <button type="submit">Create project</button>
+          </form>
+        </div>
+
+        <div class="project-list">
+          {% for item in projects %}
+          <article class="project-item {% if project and item.id == project.id %}is-active{% endif %}">
+            <a href="/projects/{{ item.id }}?tab=transcript" class="project-link">
+              <div class="project-link-top">
+                <strong class="project-name-text">{{ item.name }}</strong>
+                <span class="project-badge
+                  {% if item.status in ['transcribing', 'reviewing', 'analyzing'] %}is-active-job
+                  {% elif item.status in ['reviewed', 'analyzed', 'transcript_ready'] %}is-reviewed
+                  {% elif item.status == 'failed' %}is-failed
+                  {% else %}is-ready{% endif %}">
+                  {% if item.status == 'transcribing' %}Transcribing
+                  {% elif item.status == 'reviewing' %}Reviewing
+                  {% elif item.status == 'analyzing' %}Analyzing
+                  {% elif item.status == 'analyzed' %}Analyzed
+                  {% elif item.status == 'reviewed' %}Reviewed
+                  {% elif item.status == 'transcript_ready' %}Ready
+                  {% elif item.status == 'failed' %}Failed
+                  {% else %}Draft{% endif %}
+                </span>
+              </div>
+            </a>
+            <details class="project-menu">
+              <summary aria-label="Project actions">•••</summary>
+              <div class="project-menu-panel">
+                <form action="/projects/{{ item.id }}/rename" method="post" class="project-menu-form">
+                  <label>
+                    Project name
+                    <input type="text" name="name" value="{{ item.name }}" />
+                  </label>
+                  <button type="submit" class="secondary-button">Rename</button>
+                </form>
+                <form action="/projects/{{ item.id }}/delete" method="post" onsubmit="return confirm('Delete this project and all of its files?');">
+                  <button type="submit" class="menu-delete-button">Delete project</button>
+                </form>
+              </div>
+            </details>
+          </article>
+          {% endfor %}
+        </div>
+
+        <div class="sidebar-footer">
+          <span class="privacy-badge">
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <rect x="1.5" y="5.5" width="9" height="6" rx="1.5" stroke="currentColor" stroke-width="1.2"/>
+              <path d="M3.5 5.5V4a2.5 2.5 0 015 0v1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+            </svg>
+            Local-first · No cloud upload
+          </span>
+        </div>
+      </aside>
+
+      <!-- ═══ MAIN COLUMN ══════════════════════════════════════════════ -->
+      <section class="main-column">
+        {% if project %}
+
+        {% set status_labels = {
+          'draft': 'Draft',
+          'transcribing': 'Transcribing',
+          'transcript_ready': 'Ready to review',
+          'reviewing': 'Reviewing',
+          'reviewed': 'Reviewed',
+          'analyzing': 'Analyzing',
+          'analyzed': 'Analyzed',
+          'failed': 'Failed',
+          'stopped': 'Stopped'
+        } %}
+        {% set status_label = status_labels.get(project.status, project.status.replace('_', ' ').title()) %}
+
+        <!-- PROJECT HEADER -->
+        <header class="workspace-header">
+          <div class="header-meta">
+            <h1 class="project-title">{{ project.name }}</h1>
+            <span class="status-pill status-{{ project.status.replace('_', '-') }}">{{ status_label }}</span>
+          </div>
+
+          <div class="workflow-steps">
+            <div class="step {% if project.transcript %}is-done{% elif active_tab == 'transcript' %}is-current{% endif %}">
+              <div class="step-dot">
+                {% if project.transcript %}
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                {% else %}1{% endif %}
+              </div>
+              <span>Transcribe</span>
+            </div>
+            <div class="step-line {% if project.transcript %}is-done{% endif %}"></div>
+            <div class="step {% if project.review %}is-done{% elif active_tab == 'review' %}is-current{% elif not project.transcript %}is-locked{% endif %}">
+              <div class="step-dot">
+                {% if project.review %}
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                {% else %}2{% endif %}
+              </div>
+              <span>Review</span>
+            </div>
+            <div class="step-line {% if project.review %}is-done{% endif %}"></div>
+            <div class="step {% if project.analysis %}is-done{% elif active_tab == 'analysis' %}is-current{% elif not project.transcript %}is-locked{% endif %}">
+              <div class="step-dot">
+                {% if project.analysis %}
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                {% else %}3{% endif %}
+              </div>
+              <span>Analyze</span>
+            </div>
+          </div>
+        </header>
+
+        <!-- NOTICES -->
+        {% if error %}
+        <div class="notice error" role="alert">{{ error }}</div>
+        {% endif %}
+        {% if success %}
+        <div class="notice success" role="status">{{ success }}</div>
+        {% endif %}
+
+        <!-- TAB BAR -->
+        <div class="tab-bar">
+          <nav class="tab-links" aria-label="Workspace tabs">
+            <a href="/projects/{{ project.id }}?tab=transcript"
+               class="tab-link {% if active_tab == 'transcript' %}is-active{% endif %}">Transcript</a>
+            <a href="/projects/{{ project.id }}?tab=review"
+               class="tab-link {% if active_tab == 'review' %}is-active{% endif %} {% if not project.transcript %}is-disabled{% endif %}"
+               {% if not project.transcript %}aria-disabled="true" tabindex="-1"{% endif %}>Review</a>
+            <a href="/projects/{{ project.id }}?tab=analysis"
+               class="tab-link {% if active_tab == 'analysis' %}is-active{% endif %} {% if not project.transcript %}is-disabled{% endif %}"
+               {% if not project.transcript %}aria-disabled="true" tabindex="-1"{% endif %}>Analysis</a>
+          </nav>
+          <a href="/projects/{{ project.id }}?tab=settings"
+             class="tab-link settings-link {% if active_tab == 'settings' %}is-active{% endif %}">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M7 9a2 2 0 100-4 2 2 0 000 4z" stroke="currentColor" stroke-width="1.4" fill="none"/>
+              <path d="M11.95 8.22a5 5 0 00.05-.72 5 5 0 00-.05-.71l1.52-1.19-1.5-2.6-1.84.74a5.09 5.09 0 00-1.22-.71L8.6 1h-1.2l-.31 1.93a5.1 5.1 0 00-1.22.71L4.03 2.9l-1.5 2.6 1.52 1.19A5.1 5.1 0 004 7.5a5 5 0 00.05.72L2.53 9.41l1.5 2.6 1.84-.74c.38.27.79.49 1.22.71L7.4 14h1.2l.31-1.93c.43-.22.84-.44 1.22-.71l1.84.74 1.5-2.6-1.52-1.28z" stroke="currentColor" stroke-width="1.3" fill="none"/>
+            </svg>
+            Settings
+          </a>
+        </div>
+
+        <!-- JOB BANNER -->
+        <div class="job-banner" id="live-job-panel"
+             {% if active_tab != "transcript" or not show_job_banner %}hidden{% endif %}>
+          <div class="job-banner-main">
+            <div class="job-banner-labels">
+              <strong id="job-stage">{{ active_job.status.replace("_", " ").title() if active_job else "Queued" }}</strong>
+              <span id="job-message">Whisper is processing your audio on this machine.</span>
+            </div>
+            <div class="progress-track" style="margin-top:10px;">
+              <div class="progress-fill determinate" id="job-progress-fill"
+                   style="width: {{ active_job.progress if active_job else 0 }}%;"></div>
+            </div>
+          </div>
+          <div class="job-actions">
+            <span class="job-pct" id="job-progress-text">{{ active_job.progress if active_job else 0 }}%</span>
+            <button type="button" class="stop-button" id="stop-job-button"
+                    {% if not active_job %}disabled{% endif %}>Stop</button>
+          </div>
+        </div>
+
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!--  TAB: TRANSCRIPT                                           -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        {% if active_tab == "transcript" %}
+        <section class="panel content-panel">
+          <div class="transcript-layout">
+
+            <!-- LEFT: Form -->
+            <div class="transcript-form-col">
+              <p class="col-heading">New transcription</p>
+              <form action="/projects/{{ project.id }}/transcribe" method="post"
+                    enctype="multipart/form-data" class="form" id="transcription-form">
+
+                <label class="file-field">
+                  Audio file
+                  <div class="file-dropzone" id="audio-dropzone" tabindex="0">
+                    <input id="audio-file-input" type="file" name="file"
+                           accept=".mp3,.wav,.m4a,.mp4,.mpeg,.mpga,.webm" required />
+                    <div class="file-dropzone-inner">
+                      <span class="upload-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" focusable="false">
+                          <path d="M12 4l4.5 4.5-1.4 1.4-2.1-2.1V15h-2V7.8L8.9 9.9 7.5 8.5 12 4zm-6 12h12v2H6v-2z" fill="currentColor"/>
+                        </svg>
+                      </span>
+                      <span class="file-dropzone-text" id="audio-file-label">Drop audio here or click to browse</span>
+                      <span class="file-dropzone-meta" id="audio-file-meta">MP3 · WAV · M4A · MP4 · WEBM</span>
+                    </div>
+                  </div>
+                </label>
+
+                <label>
+                  Whisper model
+                  <select name="model">
+                    {% for model_name, meta in models.items() %}
+                    <option value="{{ model_name }}">{{ model_name }} — {{ meta.speed }} · {{ meta.vram }}</option>
+                    {% endfor %}
+                  </select>
+                  <span class="field-hint">turbo is fastest · large gives best accuracy</span>
+                </label>
+
+                <details class="advanced-options">
+                  <summary>Advanced options</summary>
+                  <div class="advanced-options-body">
+                    <div class="row">
+                      <label>
+                        Language
+                        <input type="text" name="language" placeholder="Auto-detect" />
+                      </label>
+                      <label>
+                        Task
+                        <select name="task">
+                          <option value="transcribe">Transcribe</option>
+                          <option value="translate">Translate to English</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="row">
+                      <label>
+                        Temperature
+                        <input type="number" min="0" max="1" step="0.1" name="temperature" value="0.0" />
+                      </label>
+                      <label>
+                        Word timestamps
+                        <select name="word_timestamps">
+                          <option value="true">Enabled</option>
+                          <option value="false">Disabled</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                </details>
+
+                <button type="submit" class="primary-cta">Start transcription</button>
+              </form>
+            </div>
+
+            <!-- RIGHT: Output -->
+            <div class="transcript-output-col">
+              <p class="col-heading">Transcript output</p>
+              {% if project.transcript %}
+              <div class="meta-chips">
+                <span class="chip">{{ project.transcript.model }}</span>
+                <span class="chip">{{ project.transcript.language }}</span>
+                <span class="chip">{{ project.transcript.device }}</span>
+              </div>
+              <textarea readonly id="live-transcript-output" class="transcript-area">{{ project.transcript.text }}</textarea>
+              <div class="output-location">
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                  <path d="M6 1v7M3.5 5.5L6 8l2.5-2.5M2 10.5h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <code>{{ project.transcript.job_dir }}</code>
+              </div>
+              {% if project.transcript.artifacts %}
+              <div class="export-section">
+                <span class="export-label">Export original transcript</span>
+                <div class="export-strip">
+                  <a href="{{ project.transcript.artifacts.txt }}" class="export-btn is-primary">TXT</a>
+                  <a href="{{ project.transcript.artifacts.srt }}" class="export-btn">SRT</a>
+                  <a href="{{ project.transcript.artifacts.vtt }}" class="export-btn">VTT</a>
+                  <a href="{{ project.transcript.artifacts.json }}" class="export-btn">JSON</a>
+                </div>
+              </div>
+              {% endif %}
+              {% else %}
+              <div class="output-empty">
+                <textarea readonly id="live-transcript-output"
+                          class="transcript-area transcript-area-empty"
+                          placeholder="Transcript text will appear here as Whisper runs."></textarea>
+                <p class="empty-hint">Start a transcription on the left — output streams here in real time.</p>
+              </div>
+              {% endif %}
+            </div>
+
+          </div>
+        </section>
+        {% endif %}
+
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!--  TAB: REVIEW                                               -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        {% if active_tab == "review" %}
+        <section class="panel content-panel">
+
+          <div class="section-header">
+            <div>
+              <h2>Review</h2>
+              <p>LLM QA pass that flags suspicious entities, mismatches, and inconsistent terms.</p>
+            </div>
+            <form action="/projects/{{ project.id }}/review" method="post"
+                  class="inline-form" id="review-form">
+              <button type="submit" class="primary-cta" id="run-review-button"
+                      {% if not project.transcript %}disabled{% endif %}>Run review</button>
+            </form>
+          </div>
+
+          {% if not api_key_configured %}
+          <div class="api-key-banner" role="alert">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="1.5" y="7.5" width="13" height="8" rx="2" stroke="currentColor" stroke-width="1.4"/>
+              <path d="M4.5 7.5V6a3.5 3.5 0 017 0v1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+            <span>LLM review needs an OpenAI API key to run.</span>
+            <a href="/projects/{{ project.id }}?tab=settings" class="api-key-banner-link">Configure in Settings →</a>
+          </div>
+          {% endif %}
+
+          <div class="progress-panel" id="review-running-panel" hidden>
+            <div class="progress-labels">
+              <strong id="review-running-title">Running review</strong>
+              <span id="review-running-message">Calling the LLM and preparing grouped suggestions…</span>
+            </div>
+            <div class="progress-track" style="margin-top:8px;">
+              <div class="progress-fill indeterminate"></div>
+            </div>
+          </div>
+
+          <div class="review-layout">
+
+            <!-- LEFT: Suggestions -->
+            <div class="review-suggestions-col">
+
+              <details class="import-details">
+                <summary>Import transcript file instead</summary>
+                <form action="/projects/{{ project.id }}/review/import" method="post"
+                      enctype="multipart/form-data" class="import-form">
+                  <label>
+                    Text or Markdown file
+                    <input type="file" name="transcript_file" accept=".txt,.md" required />
+                  </label>
+                  <button type="submit">Import for review</button>
+                </form>
+              </details>
+
+              {% if project.review %}
+
+              <div class="review-status-card">
+                <div class="review-status-grid">
+                  <div>
+                    <p class="stat-label">Mode</p>
+                    <p class="stat-value">{{ project.review.executed_mode|upper }}</p>
+                  </div>
+                  <div>
+                    <p class="stat-label">Engine</p>
+                    <p class="stat-value">{{ project.review.model }}</p>
+                  </div>
+                  <div>
+                    <p class="stat-label">Findings</p>
+                    <p class="stat-value">{{ project.review.suggestions|length }}</p>
+                  </div>
+                </div>
+                <p class="review-status-summary">{{ project.review.summary }}</p>
+                {% if project.review.fallback_reason %}
+                <p class="fallback-note">Fallback: {{ project.review.fallback_reason }}</p>
+                {% endif %}
+              </div>
+
+              {% if project.review.suggestions %}
+              <div class="review-list" id="review-list">
+                {% for suggestion in project.review.suggestions %}
+                <article class="review-card" data-review-card
+                         data-signature="{{ suggestion.original }}||{{ suggestion.context }}">
+                  <div class="review-topline">
+                    <strong class="review-term">{{ suggestion.original }}</strong>
+                    <span class="review-mode-tag">{{ project.review.mode|upper }}</span>
+                  </div>
+                  <p class="review-context">{{ suggestion.context }}</p>
+                  <div class="review-edit">
+                    <label>
+                      Replacement
+                      <input type="text" class="replacement-input"
+                             value="{{ suggestion.suggested }}"
+                             data-original="{{ suggestion.original }}" />
+                    </label>
+                    <div class="review-card-actions">
+                      <button type="button" class="apply-one primary-cta"
+                              data-original="{{ suggestion.original }}">Apply</button>
+                      <button type="button" class="dismiss-one secondary-button">Dismiss</button>
+                    </div>
+                  </div>
+                  {% if suggestion.justification %}
+                  <p class="review-justification">{{ suggestion.justification }}</p>
+                  {% endif %}
+                </article>
+                {% endfor %}
+              </div>
+
+              <div class="suggestions-sticky-bar">
+                <button type="button" id="apply-all" class="primary-cta apply-all-btn">Apply all suggestions</button>
+              </div>
+
+              {% else %}
+              <p class="placeholder">No suspicious items were flagged in this review pass.</p>
+              {% endif %}
+
+              {% else %}
+              <p class="placeholder">Run review above to inspect entities, terms, and consistency issues.</p>
+              {% endif %}
+
+            </div>
+
+            <!-- RIGHT: Editor -->
+            <div class="review-editor-col">
+              <form action="/projects/{{ project.id }}/save-corrections" method="post"
+                    class="review-editor-form" id="review-editor-form">
+                <div class="editor-header">
+                  <span class="col-heading" style="margin-bottom:0;">Corrected transcript</span>
+                  <button type="submit" class="save-btn"
+                          {% if not project.transcript %}disabled{% endif %}>Save</button>
+                </div>
+                <textarea id="corrected-transcript" name="corrected_text"
+                          class="corrected-area">{{ active_transcript_text }}</textarea>
+              </form>
+
+              {% if project.corrected_transcript %}
+              <div class="export-section">
+                <span class="export-label">Export corrected transcript</span>
+                <div class="export-strip">
+                  <a href="/projects/{{ project.id }}/download/corrected/txt" class="export-btn is-primary">TXT</a>
+                  <a href="/projects/{{ project.id }}/download/corrected/json" class="export-btn">JSON</a>
+                </div>
+              </div>
+              {% endif %}
+            </div>
+
+          </div>
+        </section>
+        {% endif %}
+
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!--  TAB: ANALYSIS                                             -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        {% if active_tab == "analysis" %}
+        <section class="panel content-panel">
+
+          <div class="section-header">
+            <div>
+              <h2>Analysis</h2>
+              <p>Generate a summary, key points, action items, and open questions.</p>
+            </div>
+            <div class="section-header-actions">
+              {% if project.analysis %}
+              <a href="/projects/{{ project.id }}/download/analysis/json" class="export-btn">↓ JSON</a>
+              {% endif %}
+              <form action="/projects/{{ project.id }}/analysis" method="post"
+                    class="inline-form" id="analysis-form">
+                <button type="submit" class="primary-cta" id="run-analysis-button"
+                        {% if not project.transcript %}disabled{% endif %}>Run analysis</button>
+              </form>
+            </div>
+          </div>
+
+          {% if not api_key_configured %}
+          <div class="api-key-banner" role="alert">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="1.5" y="7.5" width="13" height="8" rx="2" stroke="currentColor" stroke-width="1.4"/>
+              <path d="M4.5 7.5V6a3.5 3.5 0 017 0v1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+            </svg>
+            <span>LLM analysis needs an OpenAI API key to run.</span>
+            <a href="/projects/{{ project.id }}?tab=settings" class="api-key-banner-link">Configure in Settings →</a>
+          </div>
+          {% endif %}
+
+          <div class="progress-panel" id="analysis-running-panel" hidden>
+            <div class="progress-labels">
+              <strong id="analysis-running-title">Running analysis</strong>
+              <span id="analysis-running-message">Generating summary, key points, action items, and open questions…</span>
+            </div>
+            <div class="progress-track" style="margin-top:8px;">
+              <div class="progress-fill indeterminate"></div>
+            </div>
+          </div>
+
+          {% if project.analysis %}
+          <div class="analysis-grid">
+            <article class="analysis-card">
+              <h3>Summary</h3>
+              <p>{{ project.analysis.summary }}</p>
+            </article>
+            <article class="analysis-card">
+              <h3>Key Points</h3>
+              <ul class="flat-list">
+                {% for item in project.analysis.key_points %}
+                <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+            </article>
+            <article class="analysis-card">
+              <h3>Action Items</h3>
+              <ul class="flat-list">
+                {% for item in project.analysis.action_items %}
+                <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+            </article>
+            <article class="analysis-card">
+              <h3>Open Questions</h3>
+              <ul class="flat-list">
+                {% for item in project.analysis.open_questions %}
+                <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+            </article>
+          </div>
+          <div class="output-location" style="margin-top:16px;">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M6 1v7M3.5 5.5L6 8l2.5-2.5M2 10.5h8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <code>{{ project.analysis.saved_path }}</code>
+          </div>
+          {% else %}
+          <div class="tab-empty-state">
+            <p>Run analysis to generate a summary package from the transcript.</p>
+          </div>
+          {% endif %}
+
+        </section>
+        {% endif %}
+
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        <!--  TAB: SETTINGS                                             -->
+        <!-- ═══════════════════════════════════════════════════════════ -->
+        {% if active_tab == "settings" %}
+        <section class="panel content-panel">
+
+          <div class="section-header">
+            <div>
+              <h2>Settings</h2>
+              <p>API access, LLM model defaults, and Whisper cache for this workspace.</p>
+            </div>
+          </div>
+
+          <form action="/settings" method="post" class="settings-form">
+            <input type="hidden" name="project_id" value="{{ project.id }}" />
+            <input type="hidden" name="active_tab" value="{{ active_tab }}" />
+
+            <div class="settings-grid">
+
+              <!-- API Config -->
+              <div class="settings-section">
+                <p class="settings-section-label">API Configuration</p>
+                <div class="api-key-status {% if api_key_configured %}is-ready{% else %}needs-key{% endif %}">
+                  <strong>{% if api_key_configured %}LLM features enabled{% else %}LLM features disabled{% endif %}</strong>
+                  <span>{% if api_key_configured %}A key is saved in this folder's <code>.env</code>.{% else %}Paste an OpenAI key to enable Review and Analysis.{% endif %}</span>
+                </div>
+                <label>
+                  OpenAI API key
+                  <div class="key-input-row">
+                    <input id="openai-api-key-input" type="password" name="openai_api_key"
+                           placeholder="{% if api_key_configured %}Leave blank to keep saved key{% else %}sk-…{% endif %}"
+                           autocomplete="off" />
+                    <button type="button" class="secondary-button test-key-btn"
+                            id="test-openai-key-button">Test</button>
+                  </div>
+                </label>
+                <p class="settings-test-result" id="openai-key-test-result" hidden></p>
+              </div>
+
+              <!-- Model Defaults -->
+              <div class="settings-section">
+                <p class="settings-section-label">Model Defaults</p>
+                <label>
+                  Review model
+                  <input type="text" name="review_model" value="{{ settings.review_model }}" />
+                </label>
+                <label>
+                  Analysis model
+                  <input type="text" name="analysis_model" value="{{ settings.analysis_model }}" />
+                </label>
+                <div class="row">
+                  <label>
+                    Auto review
+                    <select name="auto_review">
+                      <option value="false" {% if not settings.auto_review %}selected{% endif %}>Off</option>
+                      <option value="true" {% if settings.auto_review %}selected{% endif %}>On</option>
+                    </select>
+                  </label>
+                  <label>
+                    Auto analysis
+                    <select name="auto_analysis">
+                      <option value="false" {% if not settings.auto_analysis %}selected{% endif %}>Off</option>
+                      <option value="true" {% if settings.auto_analysis %}selected{% endif %}>On</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="settings-actions">
+              <button type="submit" class="primary-cta">Save settings</button>
+              <p class="settings-hint">Key stored in <code>.env</code>. Preferences in <code>settings.json</code>. Leaving the key field blank keeps the existing saved key.</p>
+            </div>
+
+            <details class="cache-details">
+              <summary class="settings-section-label">Whisper model cache</summary>
+              <div class="model-list settings-model-list">
+                {% for model_name, meta in models.items() %}
+                <article class="model-card">
+                  <div class="model-heading">
+                    <h3>{{ model_name }}</h3>
+                    <span class="model-status {% if meta.downloaded %}is-downloaded{% else %}needs-download{% endif %}">
+                      {{ meta.status_label }}
+                    </span>
+                  </div>
+                  <p>{{ meta.best_for }}</p>
+                  <p class="cache-path">Cache: <code>{{ meta.cache_path }}</code></p>
+                </article>
+                {% endfor %}
+              </div>
+            </details>
+
+          </form>
+        </section>
+        {% endif %}
+
+        {% else %}
+        <div class="panel content-panel">
+          <p class="placeholder">No project selected. <a href="/projects">Create a project</a> to get started.</p>
+        </div>
+        {% endif %}
+      </section>
+
+    </main>
+
+    <script>
+      // ── New project toggle ──────────────────────────────────────────
+      const newProjectToggle = document.getElementById("new-project-toggle");
+      const newProjectWrap = document.getElementById("new-project-wrap");
+      if (newProjectToggle && newProjectWrap) {
+        newProjectToggle.addEventListener("click", () => {
+          const opening = newProjectWrap.hidden;
+          newProjectWrap.hidden = !opening;
+          newProjectToggle.classList.toggle("is-open", opening);
+          if (opening) newProjectWrap.querySelector("input")?.focus();
+        });
+      }
+
+      // ── File dropzone ───────────────────────────────────────────────
+      const audioDropzone = document.getElementById("audio-dropzone");
+      const audioFileInput = document.getElementById("audio-file-input");
+      const audioFileLabel = document.getElementById("audio-file-label");
+      const audioFileMeta  = document.getElementById("audio-file-meta");
+      const formatFileSize = (size) => {
+        if (size < 1024) return `${size} B`;
+        if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+        return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+      };
+      const syncAudioFileUi = () => {
+        if (!audioDropzone || !audioFileInput || !audioFileLabel || !audioFileMeta) return;
+        const [file] = audioFileInput.files || [];
+        if (file) {
+          audioDropzone.classList.add("has-file");
+          audioFileLabel.textContent = file.name;
+          audioFileMeta.textContent = formatFileSize(file.size);
+        } else {
+          audioDropzone.classList.remove("has-file");
+          audioFileLabel.textContent = "Drop audio here or click to browse";
+          audioFileMeta.textContent = "MP3 · WAV · M4A · MP4 · WEBM";
+        }
+      };
+      audioFileInput?.addEventListener("change", syncAudioFileUi);
+      ["dragenter", "dragover"].forEach((e) => {
+        audioDropzone?.addEventListener(e, (ev) => { ev.preventDefault(); audioDropzone.classList.add("is-dragover"); });
+      });
+      ["dragleave", "drop"].forEach((e) => {
+        audioDropzone?.addEventListener(e, (ev) => { ev.preventDefault(); audioDropzone.classList.remove("is-dragover"); });
+      });
+      syncAudioFileUi();
+
+      // ── Transcription job polling ───────────────────────────────────
+      const transcriptionForm  = document.getElementById("transcription-form");
+      const liveJobPanel       = document.getElementById("live-job-panel");
+      const jobStage           = document.getElementById("job-stage");
+      const jobMessage         = document.getElementById("job-message");
+      const jobProgressFill    = document.getElementById("job-progress-fill");
+      const jobProgressText    = document.getElementById("job-progress-text");
+      const stopJobButton      = document.getElementById("stop-job-button");
+      const liveTranscriptOutput = document.getElementById("live-transcript-output");
+      let activeJobId   = {{ ("'" ~ active_job.job_id ~ "'") if active_job else "null" }};
+      let showJobBanner = {{ "true" if show_job_banner else "false" }};
+      const projectId   = "{{ project.id if project else '' }}";
+      let pollTimer = null;
+      let terminalReloadTimer = null;
+
+      const setJobBannerVisible = (visible) => {
+        if (!liveJobPanel) return;
+        liveJobPanel.hidden = !visible;
+        if (visible) liveJobPanel.removeAttribute("hidden");
+        showJobBanner = visible;
+      };
+      const stopPolling = () => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; };
+      const renderJobProgress = (snapshot) => {
+        if (!liveJobPanel || !jobStage || !jobProgressFill || !jobProgressText) return;
+        if (!snapshot || (!snapshot.is_active && !snapshot.is_terminal)) {
+          setJobBannerVisible(false); stopPolling(); return;
+        }
+        const progress = Math.max(0, Math.min(100, Number(snapshot.percent ?? snapshot.progress ?? 0)));
+        setJobBannerVisible(snapshot.is_active || snapshot.is_terminal);
+        jobStage.textContent = snapshot.stage || (snapshot.status || "queued").replaceAll("_", " ");
+        if (jobMessage) jobMessage.textContent = snapshot.message || "Working on transcription.";
+        jobProgressFill.style.width = `${progress}%`;
+        jobProgressText.textContent = `${progress}%`;
+        if (liveTranscriptOutput && typeof snapshot.partial_text === "string")
+          liveTranscriptOutput.value = snapshot.partial_text;
+        if (stopJobButton) {
+          stopJobButton.disabled = !snapshot.can_stop;
+          stopJobButton.textContent = snapshot.status === "stopping" ? "Stopping…" : "Stop";
+        }
+        if (snapshot.is_terminal) {
+          stopPolling();
+          if (!terminalReloadTimer)
+            terminalReloadTimer = window.setTimeout(() => {
+              setJobBannerVisible(false);
+              window.location.reload();
+            }, snapshot.status === "completed" ? 700 : 300);
+        }
+      };
+      const pollJob = async () => {
+        if (!activeJobId || !projectId) return;
+        const response = await fetch(`/projects/${projectId}/jobs/${activeJobId}`);
+        if (!response.ok) { setJobBannerVisible(false); stopPolling(); return; }
+        renderJobProgress(await response.json());
+      };
+      const startPolling = () => { stopPolling(); pollTimer = setInterval(pollJob, 1000); pollJob(); };
+
+      if (transcriptionForm) {
+        transcriptionForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const formData = new FormData(transcriptionForm);
+          const response = await fetch(transcriptionForm.action, { method: "POST", body: formData });
+          const payload  = await response.json();
+          if (!response.ok) { alert(payload.detail || "Transcription could not be started."); return; }
+          activeJobId = payload.job_id;
+          renderJobProgress(payload.progress || {
+            job_id: payload.job_id, status: "queued", stage: "Queued",
+            message: "Waiting for the transcription worker to start.",
+            progress: 0, percent: 0, partial_text: "",
+            is_active: true, is_terminal: false, can_stop: true,
+          });
+          startPolling();
+        });
+      }
+
+      if (stopJobButton) {
+        stopJobButton.addEventListener("click", async () => {
+          if (!activeJobId || !projectId) return;
+          stopJobButton.disabled = true;
+          stopJobButton.textContent = "Stopping…";
+          if (jobStage) jobStage.textContent = "stopping";
+          if (jobMessage) jobMessage.textContent = "Stop requested. Clearing this job now.";
+          const response = await fetch(`/projects/${projectId}/jobs/${activeJobId}/stop`, { method: "POST" });
+          if (!response.ok) {
+            stopJobButton.disabled = false; stopJobButton.textContent = "Stop";
+            alert("Could not stop the transcription job."); return;
+          }
+          const payload = await response.json();
+          renderJobProgress(payload.progress || {
+            status: "stopped", stage: "Stopped", message: "Transcription stopped.",
+            progress: Number(jobProgressText?.textContent?.replace("%","")) || 0,
+            percent:  Number(jobProgressText?.textContent?.replace("%","")) || 0,
+            partial_text: liveTranscriptOutput?.value || "",
+            is_active: false, is_terminal: true, can_stop: false,
+          });
+        });
+      }
+
+      if (activeJobId && showJobBanner && !pollTimer) startPolling();
+
+      // ── Review form ─────────────────────────────────────────────────
+      const reviewForm         = document.getElementById("review-form");
+      const reviewRunningPanel = document.getElementById("review-running-panel");
+      const runReviewButton    = document.getElementById("run-review-button");
+      if (reviewForm && reviewRunningPanel && runReviewButton) {
+        reviewForm.addEventListener("submit", () => {
+          reviewRunningPanel.hidden = false;
+          runReviewButton.disabled = true;
+          runReviewButton.textContent = "Running…";
+        });
+      }
+
+      // ── Analysis form ───────────────────────────────────────────────
+      const analysisForm         = document.getElementById("analysis-form");
+      const analysisRunningPanel = document.getElementById("analysis-running-panel");
+      const runAnalysisButton    = document.getElementById("run-analysis-button");
+      if (analysisForm && analysisRunningPanel && runAnalysisButton) {
+        analysisForm.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          analysisRunningPanel.hidden = false;
+          runAnalysisButton.disabled = true;
+          runAnalysisButton.textContent = "Running…";
+          const formData = new FormData(analysisForm);
+          const response = await fetch(analysisForm.action, { method: "POST", body: formData });
+          if (!response.ok) {
+            alert("Analysis failed. Please try again.");
+            analysisRunningPanel.hidden = true;
+            runAnalysisButton.disabled = false;
+            runAnalysisButton.textContent = "Run analysis";
+            return;
+          }
+          const html = await response.text();
+          document.open(); document.write(html); document.close();
+        });
+      }
+
+      // ── Test OpenAI key ─────────────────────────────────────────────
+      const testOpenAiKeyButton  = document.getElementById("test-openai-key-button");
+      const openAiKeyInput       = document.getElementById("openai-api-key-input");
+      const openAiKeyTestResult  = document.getElementById("openai-key-test-result");
+      if (testOpenAiKeyButton && openAiKeyTestResult) {
+        testOpenAiKeyButton.addEventListener("click", async () => {
+          testOpenAiKeyButton.disabled = true;
+          testOpenAiKeyButton.textContent = "Testing…";
+          openAiKeyTestResult.hidden = false;
+          openAiKeyTestResult.className = "settings-test-result";
+          openAiKeyTestResult.textContent = "Checking key with OpenAI…";
+          const body = new URLSearchParams();
+          body.set("openai_api_key", openAiKeyInput?.value || "");
+          try {
+            const response = await fetch("/settings/test-openai-key", {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: body.toString(),
+            });
+            const payload = await response.json();
+            openAiKeyTestResult.classList.add(payload.ok ? "is-success" : "is-error");
+            openAiKeyTestResult.textContent = payload.message || "No response.";
+          } catch (error) {
+            openAiKeyTestResult.classList.add("is-error");
+            openAiKeyTestResult.textContent = `Could not test key: ${error}`;
+          } finally {
+            testOpenAiKeyButton.disabled = false;
+            testOpenAiKeyButton.textContent = "Test";
+          }
+        });
+      }
+
+      // ── Review corrections ──────────────────────────────────────────
+      const correctedTranscript = document.getElementById("corrected-transcript");
+      if (correctedTranscript) {
+        const persistReviewState = async () => {
+          const dismissed = [];
+          document.querySelectorAll("[data-review-card][data-dismissed='true']").forEach((card) => {
+            dismissed.push(card.dataset.signature);
+          });
+          const suggestions = [];
+          document.querySelectorAll("[data-review-card]:not([data-dismissed='true'])").forEach((card) => {
+            const original      = card.querySelector(".apply-one")?.dataset.original || "";
+            const suggested     = card.querySelector(".replacement-input")?.value?.trim() || "";
+            const justification = card.querySelector(".review-justification")?.textContent?.trim() || "";
+            const context       = card.querySelector(".review-context")?.textContent?.trim() || "";
+            suggestions.push({ original, suggested, justification, context });
+          });
+          const body = new URLSearchParams();
+          body.set("corrected_text",   correctedTranscript.value);
+          body.set("suggestions_json", JSON.stringify(suggestions));
+          body.set("dismissed_json",   JSON.stringify(dismissed));
+          await fetch(`/projects/${projectId}/review-state`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: body.toString(),
+          });
+        };
+
+        const escapeRegExp = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const applyReplacement = (original, replacement) => {
+          if (!replacement || original === replacement) return;
+          correctedTranscript.value = correctedTranscript.value.replace(
+            new RegExp(`\\b${escapeRegExp(original)}\\b`, "g"), replacement
+          );
+        };
+
+        document.querySelectorAll(".apply-one").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const original = button.dataset.original;
+            const card     = button.closest("[data-review-card]");
+            const input    = button.closest(".review-edit")?.querySelector(".replacement-input");
+            applyReplacement(original, input.value.trim());
+            if (card) card.remove();
+            await persistReviewState();
+          });
+        });
+
+        document.querySelectorAll(".dismiss-one").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const card = button.closest("[data-review-card]");
+            if (card) { card.dataset.dismissed = "true"; card.remove(); }
+            await persistReviewState();
+          });
+        });
+
+        const applyAll = document.getElementById("apply-all");
+        if (applyAll) {
+          applyAll.addEventListener("click", async () => {
+            document.querySelectorAll(".replacement-input").forEach((input) => {
+              applyReplacement(input.dataset.original, input.value.trim());
+            });
+            document.querySelectorAll("[data-review-card]").forEach((card) => card.remove());
+            await persistReviewState();
+          });
+        }
+      }
+    </script>
+  </body>
+</html>

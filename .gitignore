@@ -1,0 +1,21 @@
+# Secrets: the OpenAI API key lives here
+.env
+.env.*
+!.env.example
+
+# Private data: recordings, transcripts, reviews
+data/
+
+# Local preferences (default glossary may contain client names)
+settings.json
+
+# Environment and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.json.tmp
+
+# Local tooling / backups
+.claude/
+_backup_*/
