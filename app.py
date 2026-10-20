@@ -254,34 +254,28 @@ def import_transcript(session_id: str, original_name: str, file: UploadFile) -> 
 
 
 @app.get("/api/sessions/{session_id}/audio/export")
-def api_audio_export(session_id: str, track: str = "mix") -> FileResponse:
-    """MP3 of the session audio: the mix, or one recorded source (mic/system)."""
+def api_audio_export(session_id: str) -> FileResponse:
+    """MP3 of the session audio (for recordings: both sources mixed)."""
     session = require_session(session_id)
     audio = session.get("audio")
     if not audio:
         raise HTTPException(status_code=404, detail="No audio in this session.")
     root = store.audio_dir(session_id)
     tracks = audio.get("tracks") or {}
-    if track == "mix":
-        # Recordings: re-mix the full-quality tracks (mix.wav is only 16 kHz for Whisper).
-        sources = [root / item["file"] for item in tracks.values()] or [root / audio["file"]]
-    elif track in tracks:
-        sources = [root / tracks[track]["file"]]
-    else:
-        raise HTTPException(status_code=404, detail="Unknown track.")
+    # Recordings: re-mix the full-quality tracks (mix.wav is only 16 kHz for Whisper).
+    sources = [root / item["file"] for item in tracks.values()] or [root / audio["file"]]
     if not all(path.exists() for path in sources):
         raise HTTPException(status_code=404, detail="The audio files are missing.")
 
     # Recordings own a folder (rec-*/); uploads share audio/, so key the cache by file.
     stored = root / audio["file"]
-    cached = stored.parent / (f"export-{track}.mp3" if tracks else f"export-{stored.stem}-{track}.mp3")
+    cached = stored.parent / ("export.mp3" if tracks else f"export-{stored.stem}.mp3")
     if not cached.exists():
         try:
             export_mp3(sources, cached)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"MP3 export failed: {exc}") from exc
-    label = {"mix": "", "mic": " (microphone)", "system": " (system audio)"}[track] if track in ("mix", "mic", "system") else ""
-    safe = "".join(ch for ch in f"{session['name']}{label}" if ch.isalnum() or ch in " ()-_").strip() or "recording"
+    safe = "".join(ch for ch in session["name"] if ch.isalnum() or ch in " ()-_").strip() or "recording"
     return FileResponse(cached, filename=f"{safe}.mp3", media_type="audio/mpeg")
 
 

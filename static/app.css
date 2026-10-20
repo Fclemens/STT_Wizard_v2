@@ -358,8 +358,3 @@ dialog.settings .card-head h2 { margin-right: auto; }
 @media (max-width: 760px) {
   .source-row { grid-template-columns: 1fr; gap: 6px; }
 }
-
-/* Audio export ---------------------------------------------------------- */
-.audio-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.audio-export { display: flex; align-items: center; gap: 6px; }
-.audio-export .btn:first-child { font-weight: 700; }

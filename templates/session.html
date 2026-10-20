@@ -60,7 +60,6 @@
               <button type="button" role="tab" data-mode="record" class="is-active">Record</button>
               <button type="button" role="tab" data-mode="upload">Upload a file</button>
             </div>
-            <button type="button" class="btn btn-ghost btn-sm" id="cancel-replace" hidden>Cancel</button>
           </div>
 
           <div id="record-panel">
@@ -107,10 +106,7 @@
               <span class="muted small" id="audio-info"></span>
             </div>
             <audio id="player" controls preload="metadata"></audio>
-            <div class="audio-actions">
-              <div class="audio-export" id="audio-export"></div>
-              <button type="button" class="btn btn-ghost btn-sm" id="replace-audio">New recording or file</button>
-            </div>
+            <button type="button" class="btn btn-ghost" id="export-audio">Export MP3</button>
           </div>
         </section>
 

@@ -14,7 +14,6 @@
     reviewFilter: "pending",
     activeLine: null,
     inputMode: "record",
-    replacing: false,
     monitoring: false,
     devices: { available: true, error: null, mics: [], systems: [] },
   };
@@ -121,10 +120,9 @@
     const hasAudio = Boolean(s.audio);
     const imported = Boolean(s.transcript && s.transcript.source === "import");
     const recording = s.status === "recording";
-    const choosing = recording || state.replacing || (!hasAudio && !imported);
-    $("input-card").hidden = imported && !choosing;
+    const choosing = recording || (!hasAudio && !imported);
+    $("input-card").hidden = imported;
     $("input-head").hidden = recording || !choosing;
-    $("cancel-replace").hidden = !(state.replacing && (hasAudio || imported));
     document.querySelectorAll("#input-head [data-mode]").forEach((b) => b.classList.toggle("is-active", b.dataset.mode === state.inputMode));
     $("record-panel").hidden = !choosing || (state.inputMode !== "record" && !recording);
     $("upload-panel").hidden = !choosing || recording || state.inputMode !== "upload";
@@ -135,38 +133,21 @@
       const mb = s.audio.size ? `${(s.audio.size / 1048576).toFixed(1)} MB` : "";
       const sources = s.audio.tracks ? Object.values(s.audio.tracks).map((t) => t.device).filter(Boolean).join(" + ") : "";
       $("audio-info").textContent = [s.audio.duration ? fmtTime(s.audio.duration) : "", mb, sources].filter(Boolean).join(" · ");
-      renderAudioExport(s.audio);
       const player = $("player");
       if (player.dataset.src !== s.audio.url + s.audio.file) {
         player.dataset.src = s.audio.url + s.audio.file;
         player.src = `${s.audio.url}?v=${encodeURIComponent(s.audio.file)}`;
       }
     }
-    $("replace-audio").disabled = busy();
   }
 
-  function renderAudioExport(audio) {
-    const container = $("audio-export");
-    const key = audio.file;
-    if (container.dataset.key === key) return; // keep "Preparing…" state across re-renders
-    container.dataset.key = key;
-    const tracks = Object.keys(audio.tracks || {});
-    const options = [{ track: "mix", label: "Export MP3" }];
-    if (tracks.length > 1) {
-      if (tracks.includes("mic")) options.push({ track: "mic", label: "Mic only" });
-      if (tracks.includes("system")) options.push({ track: "system", label: "System only" });
-    }
-    container.innerHTML = options
-      .map((o, i) => `<button type="button" class="btn ${i === 0 ? "btn-ghost" : "btn-ghost btn-sm"}" data-export-track="${o.track}">${o.label}</button>`)
-      .join("");
-  }
-
-  async function exportAudio(button) {
+  async function exportAudio() {
+    const button = $("export-audio");
     const label = button.textContent;
     button.disabled = true;
     button.textContent = "Preparing…";
     try {
-      const response = await fetch(`/api/sessions/${sid()}/audio/export?track=${button.dataset.exportTrack}`);
+      const response = await fetch(`/api/sessions/${sid()}/audio/export`);
       if (!response.ok) {
         let detail = `Export failed (${response.status})`;
         try { detail = (await response.json()).detail || detail; } catch { /* not JSON */ }
@@ -310,7 +291,6 @@
     const session = await run(() => api(`/api/sessions/${sid()}/recording/start`, { method: "POST", json: sources }));
     if (!session) return;
     state.monitoring = false;
-    state.replacing = false;
     state.settings.mic_device = sources.mic_name || state.settings.mic_device;
     state.settings.system_device = sources.system_name || state.settings.system_device;
     $("rec-timer").textContent = "0:00";
@@ -679,7 +659,6 @@
     toast(`Uploading ${file.name}…`);
     const session = await run(() => api(`/api/sessions/${sid()}/upload`, { method: "POST", body: form }));
     if (!session) return;
-    state.replacing = false;
     applySession(session);
     if (session.audio) startTranscription();
     else toast("Transcript imported. You can review it now.");
@@ -776,19 +755,7 @@
     dz.addEventListener("dragleave", () => dz.classList.remove("is-over"));
     dz.addEventListener("drop", (e) => { e.preventDefault(); dz.classList.remove("is-over"); uploadFile(e.dataTransfer.files[0]); });
     $("file-input").addEventListener("change", (e) => { uploadFile(e.target.files[0]); e.target.value = ""; });
-    $("replace-audio").addEventListener("click", () => {
-      state.replacing = true;
-      renderInput();
-    });
-    $("audio-export").addEventListener("click", (e) => {
-      const button = e.target.closest("[data-export-track]");
-      if (button) exportAudio(button);
-    });
-    $("cancel-replace").addEventListener("click", () => {
-      state.replacing = false;
-      if (state.monitoring) toggleLevelCheck();
-      renderInput();
-    });
+    $("export-audio").addEventListener("click", exportAudio);
     document.querySelectorAll("#input-head [data-mode]").forEach((button) =>
       button.addEventListener("click", () => {
         state.inputMode = button.dataset.mode;
