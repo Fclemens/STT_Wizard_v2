@@ -275,15 +275,22 @@ def _run_review(session_id: str, chain_analysis: bool) -> None:
 
     review["created_at"] = store.now_iso()
     with store.edit(session_id) as live:
+        # A re-run keeps what the user already handled (applied, dismissed, stale) and only
+        # replaces the pending suggestions; findings already handled are not proposed again.
+        previous = (live.get("review") or {}).get("suggestions", [])
+        handled = [item for item in previous if item.get("status") != "pending"]
+        handled_keys = {(item["segment_id"], item["original"].lower(), item["suggested"].lower()) for item in handled}
         dismissed = set(live.get("dismissed_signatures") or [])
         hidden = 0
-        kept = []
+        new = []
         for suggestion in review["suggestions"]:
+            if (suggestion["segment_id"], suggestion["original"].lower(), suggestion["suggested"].lower()) in handled_keys:
+                continue  # already listed under Handled
             if store.review_signature(suggestion) in dismissed:
                 hidden += 1
                 continue
-            kept.append(suggestion)
-        review["suggestions"] = kept
+            new.append(suggestion)
+        review["suggestions"] = new + handled
         review["hidden_dismissed"] = hidden
         live["review"] = review
         live["status"] = "ready"
