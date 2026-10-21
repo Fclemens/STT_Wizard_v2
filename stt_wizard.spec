@@ -1,6 +1,7 @@
 # PyInstaller spec: one-folder build of the desktop app ("STT Wizard.exe").
 # Build with BUILD_EXE.bat (or build.ps1), not by hand.
 import importlib.util
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
@@ -13,10 +14,18 @@ def package_dir(name):
     return Path(list(spec.submodule_search_locations)[0])
 
 
+# Variant (set by build.ps1): "nvidia" bundles cuBLAS for GPU transcription (~740 MB);
+# "cpu" leaves it out and the app always runs on the CPU.
+VARIANT = os.environ.get("STTW_VARIANT", "nvidia")
+if VARIANT not in ("nvidia", "cpu"):
+    raise SystemExit(f"Unknown STTW_VARIANT: {VARIANT}")
+
 # GPU: CTranslate2 needs only cuBLAS for Whisper (cuDNN's 1+ GB is not required; tested).
 # stt_engine looks for them in <bundle>/nvidia/*/bin.
-cublas_bin = package_dir("nvidia.cublas") / "bin"
-gpu_binaries = [(str(cublas_bin / dll), "nvidia/cublas/bin") for dll in ("cublas64_12.dll", "cublasLt64_12.dll")]
+gpu_binaries = []
+if VARIANT == "nvidia":
+    cublas_bin = package_dir("nvidia.cublas") / "bin"
+    gpu_binaries = [(str(cublas_bin / dll), "nvidia/cublas/bin") for dll in ("cublas64_12.dll", "cublasLt64_12.dll")]
 
 binaries = (
     gpu_binaries
@@ -34,6 +43,8 @@ hiddenimports = (
 )
 # Never bundle these even if they are installed in the build environment.
 excludes = ["torch", "whisper", "numba", "llvmlite", "tkinter", "matplotlib", "IPython", "pytest"]
+if VARIANT == "cpu":
+    excludes.append("nvidia")  # the Python package only locates the DLLs
 
 a = Analysis(
     [str(ROOT / "desktop.py")],

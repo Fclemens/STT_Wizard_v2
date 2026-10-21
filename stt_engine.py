@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import threading
@@ -80,8 +81,12 @@ def cuda_usable() -> bool:
                 _add_cuda_dll_dirs()
                 import ctranslate2
 
-                _cuda_state["usable"] = ctranslate2.get_cuda_device_count() > 0
-            except Exception:  # noqa: BLE001
+                if ctranslate2.get_cuda_device_count() > 0:
+                    # An NVIDIA card is not enough: the CPU-only build ships without cuBLAS.
+                    if os.name == "nt":
+                        ctypes.WinDLL("cublas64_12.dll")  # raises OSError if it is missing
+                    _cuda_state["usable"] = True
+            except Exception:  # noqa: BLE001 - no GPU, no driver or no cuBLAS: use the CPU
                 _cuda_state["usable"] = False
         return _cuda_state["usable"] and not _cuda_state["broken"]
 

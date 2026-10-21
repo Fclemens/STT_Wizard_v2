@@ -12,11 +12,23 @@ This folder is a portable copy of the local Speech-to-Text Wizard.
 BUILD_EXE.bat
 ```
 
-It builds outside this folder (in `%LOCALAPPDATA%\STTWizardBuild`, so OneDrive does not sync ~2 GB of build files)
-and produces:
+It asks which version to build:
 
-- `dist\STT Wizard\STT Wizard.exe` — the app folder (about 1 GB, mostly the NVIDIA GPU library)
-- `STT-Wizard-win64.zip` — the same folder zipped, to copy to another PC
+| Version | For | App folder | Zip |
+|---|---|---|---|
+| **NVIDIA GPU** | PCs with an NVIDIA card: fast GPU transcription (CPU on other PCs) | ~980 MB | ~620 MB |
+| **CPU only** | any PC (AMD/Intel graphics, or to keep it small): slower transcription | ~250 MB | ~100 MB |
+| **Both** | builds the two above | | |
+
+The difference is NVIDIA's cuBLAS library (~740 MB). Without an NVIDIA card it would never be used.
+
+It builds outside this folder (in `%LOCALAPPDATA%\STTWizardBuild`, so OneDrive does not sync gigabytes of build
+files) and produces, per version (`nvidia` / `cpu`):
+
+- `dist-<version>\STT Wizard\STT Wizard.exe` — the app folder
+- `STT-Wizard-win64-<version>.zip` — the same folder zipped, to copy to another PC
+
+To skip the question: `build.ps1 -Variant nvidia` (or `cpu`, `both`).
 
 **Use it:** unzip anywhere (not in a synced folder if you record long meetings) and run `STT Wizard.exe`.
 Everything stays inside that folder: `data\` (sessions, recordings), `models\` (Whisper models, downloaded on first
