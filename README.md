@@ -108,7 +108,9 @@ The same glossary tells Review which spellings are authoritative.
 - `Transcription settings → Glossary for this session`: terms for this recording only.
 - After applying a Review suggestion, `+ Glossary` adds the corrected term to the default glossary.
 
-Write one term per line. The terms are given to Whisper as hotwords for every 30-second window; keep the list short (about 150 words) and put the hardest terms first.
+Write one term per line, most important first. Whisper gets them as hotwords for every 30-second window, but its
+prompt is small (it shares space with the running context), so only the first terms that fit are used — typically
+40–60. The transcript header shows how many were used (e.g. `glossary 38/98 terms`). Review always uses the full list.
 
 ## OpenAI Settings
 

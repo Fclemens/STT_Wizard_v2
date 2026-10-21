@@ -172,7 +172,7 @@ def _finish_transcription(session_id: str, meta: dict[str, Any]) -> None:
         transcript = live["transcript"]
         transcript["completed_at"] = store.now_iso()
         transcript["stopped"] = bool(meta.get("stopped"))
-        for key in ("language", "device"):
+        for key in ("language", "device", "glossary_terms"):
             if meta.get(key):
                 transcript[key] = meta[key]
         if meta.get("duration") and live.get("audio"):

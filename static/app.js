@@ -351,7 +351,7 @@
     const defaults = (state.settings.default_glossary || "").split("\n").filter((l) => l.trim()).length;
     $("glossary-hint").textContent =
       (defaults ? `Plus ${defaults} term(s) from your default glossary in Settings. ` : "") +
-      "Keep it short (under ~150 words): the terms are hinted to Whisper throughout the recording.";
+      "Whisper uses the first ~40–60 terms (it shares space with the running context), so put the most important first. Review always uses the full list.";
   }
 
   function fillModelSelect(select, selected) {
@@ -440,7 +440,7 @@
       return;
     }
     const t = s.transcript;
-    const metaBits = [t.model, t.language, t.device, t.accurate ? "beam search" : "", t.glossary_used ? "glossary" : "", t.stopped ? "stopped early" : ""];
+    const metaBits = [t.model, t.language, t.device, t.accurate ? "beam search" : "", t.glossary_terms ? `glossary ${t.glossary_terms} terms` : t.glossary_used ? "glossary" : "", t.stopped ? "stopped early" : ""];
     $("transcript-meta").textContent = `${list.length} lines · ${metaBits.filter(Boolean).join(" · ")}`;
     $("follow-audio").parentElement.hidden = !s.audio;
 

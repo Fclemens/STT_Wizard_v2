@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
@@ -126,9 +127,35 @@ def _ensure_downloaded(key: str) -> Path:
     return target
 
 
+# Whisper's decoder window is 448 tokens. As in OpenAI's Whisper, the prompt (glossary + text carried over
+# from the previous window) may use at most half of it, so ~224 tokens always remain for the new text.
+# faster-whisper allows 223 for the glossary *plus* 223 for the context: with a long glossary the prompt
+# exceeds 448 and decoding fails with "The maximum decoding length must be > 0".
+PROMPT_TOKEN_BUDGET = 223
+GLOSSARY_MAX_TOKENS = 150  # leaves at least ~73 tokens of running context
+
+
+@lru_cache(maxsize=1)
+def _model_class():
+    from faster_whisper import WhisperModel
+
+    class BudgetedWhisperModel(WhisperModel):
+        """WhisperModel whose glossary + context prompt never exceeds PROMPT_TOKEN_BUDGET."""
+
+        def get_prompt(self, tokenizer, previous_tokens, without_timestamps=False, prefix=None, hotwords=None):
+            if hotwords and not prefix:
+                room = PROMPT_TOKEN_BUDGET - len(tokenizer.encode(" " + hotwords.strip()))
+                previous_tokens = previous_tokens[-room:] if room > 0 else []
+            return super().get_prompt(
+                tokenizer, previous_tokens, without_timestamps=without_timestamps, prefix=prefix, hotwords=hotwords
+            )
+
+    return BudgetedWhisperModel
+
+
 def get_model(key: str, device: str):
     """Load (or reuse) one model; only one is kept in memory at a time."""
-    from faster_whisper import WhisperModel
+    WhisperModel = _model_class()
 
     with _model_lock:
         if _loaded["key"] == key and _loaded["device"] == device:
@@ -193,9 +220,16 @@ def is_low_confidence_segment(segment) -> bool:
 # ── Transcription ──────────────────────────────────────────────────────────
 
 
-def glossary_hotwords(glossary: str) -> str | None:
+def glossary_hotwords(glossary: str, model) -> tuple[str | None, int, int]:
+    """Whole glossary terms, in order, that fit in GLOSSARY_MAX_TOKENS. Returns (hotwords, used, total)."""
     terms = [line.strip() for line in glossary.splitlines() if line.strip()]
-    return ", ".join(terms) or None
+    kept: list[str] = []
+    for term in terms:
+        candidate = ", ".join(kept + [term])
+        if len(model.hf_tokenizer.encode(" " + candidate, add_special_tokens=False).ids) > GLOSSARY_MAX_TOKENS:
+            break
+        kept.append(term)
+    return (", ".join(kept) or None), len(kept), len(terms)
 
 
 MAX_LINE_SECONDS = 20.0
@@ -279,6 +313,7 @@ def transcribe(
 def _run(audio, duration, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop):
     try:
         model = get_model(model_name, device)
+        hotwords, terms_used, terms_total = glossary_hotwords(glossary, model)
         segments, info = model.transcribe(
             audio,
             language=language or None,
@@ -286,7 +321,7 @@ def _run(audio, duration, device, model_name, language, task, glossary, accurate
             beam_size=5 if accurate else 1,
             best_of=5 if accurate else 1,
             temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0] if accurate else 0.0,
-            hotwords=glossary_hotwords(glossary),
+            hotwords=hotwords,
             condition_on_previous_text=True,
             word_timestamps=True,
             hallucination_silence_threshold=2.0,
@@ -338,6 +373,7 @@ def _run(audio, duration, device, model_name, language, task, glossary, accurate
         "language": info.language or "unknown",
         "device": f"{device} · {_compute_type(device)}",
         "duration": round(duration, 2),
+        "glossary_terms": f"{terms_used}/{terms_total}" if terms_total else None,
         "stopped": stopped,
     }
 
