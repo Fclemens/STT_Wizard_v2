@@ -361,33 +361,65 @@ def repair_wav(path: Path) -> float:
     return data_size / block_align / rate if rate else 0.0
 
 
-def label_speakers(segments: list[dict[str, Any]], mic: np.ndarray, system: np.ndarray, rate: int) -> int:
-    """Tag each segment "Me" (mic dominant) or "Others" (system dominant).
+# Speaker labelling thresholds (dB). Tuned on a real 22-minute call where the mic was
+# near silent most of the time; relative-loudness scoring mislabelled its hiss as "Me".
+ACTIVE_ABOVE_FLOOR_DB = 15   # a track is "active" this far above its own noise floor...
+MIC_MIN_DBFS = -65           # ...and above these absolute levels
+SYSTEM_MIN_DBFS = -55
+MIC_ABOVE_ECHO_DB = 10       # mic sound must exceed the expected speaker echo by this much
+MIN_ACTIVE_SHARE = 0.15      # lines where neither side is active this often stay unlabelled
 
-    Each track is normalised by its own typical speech level, so a quiet mic
-    or loud speakers do not bias the result. Returns the number labelled.
+
+def label_speakers(segments: list[dict[str, Any]], mic: np.ndarray, system: np.ndarray, rate: int) -> int:
+    """Tag each segment "Me" (microphone) or "Others" (system audio) by actual voice activity.
+
+    Per 100 ms frame:
+      * system active: well above the system track's noise floor;
+      * mic active ("own voice"): well above the mic's noise floor AND above the echo
+        expected from the speakers (how strongly system sound leaks into the mic is
+        measured over the whole recording).
+    A line is labelled by whichever side is active in more of its frames; if neither
+    is active often enough it is left unlabelled. Returns the number labelled.
     """
 
-    def frame_rms(audio: np.ndarray) -> np.ndarray:
+    def frame_db(audio: np.ndarray) -> np.ndarray:
         frame = rate // 10
         usable = len(audio) // frame * frame
         if not usable:
-            return np.zeros(1)
-        return np.sqrt(np.mean(audio[:usable].reshape(-1, frame) ** 2, axis=1))
+            return np.full(1, -120.0)
+        rms = np.sqrt(np.mean(audio[:usable].reshape(-1, frame) ** 2, axis=1))
+        return 20 * np.log10(np.maximum(rms, 1e-6))
 
-    mic_frames, sys_frames = frame_rms(mic), frame_rms(system)
-    mic_ref = max(float(np.percentile(mic_frames, 95)), 1e-4)
-    sys_ref = max(float(np.percentile(sys_frames, 95)), 1e-4)
+    mic_db, sys_db = frame_db(mic), frame_db(system)
+    n = min(len(mic_db), len(sys_db))
+    mic_db, sys_db = mic_db[:n], sys_db[:n]
+    mic_floor = max(float(np.percentile(mic_db, 3)), -100.0)  # quietest moments; speech has pauses
+    sys_floor = max(float(np.percentile(sys_db, 3)), -100.0)  # gap-filled loopback is digital silence
+
+    sys_active = (sys_db > sys_floor + ACTIVE_ABOVE_FLOOR_DB) & (sys_db > SYSTEM_MIN_DBFS)
+    if sys_active.sum() >= 50:
+        coupling = float(np.median(mic_db[sys_active] - sys_db[sys_active]))  # speaker -> mic leak
+        expected_echo = np.maximum(mic_floor, sys_db + coupling)
+    else:
+        expected_echo = np.full(n, mic_floor)
+    mic_active = (
+        (mic_db > mic_floor + ACTIVE_ABOVE_FLOOR_DB)
+        & (mic_db > MIC_MIN_DBFS)
+        & (mic_db > expected_echo + MIC_ABOVE_ECHO_DB)
+    )
+
     labelled = 0
     for segment in segments:
+        segment.pop("speaker", None)
         if segment.get("start") is None:
             continue
-        lo, hi = int(segment["start"] * 10), max(int(segment["end"] * 10), int(segment["start"] * 10) + 1)
-        mic_part, sys_part = mic_frames[lo:hi], sys_frames[lo:hi]
-        mic_score = float(np.mean(mic_part)) / mic_ref if mic_part.size else 0.0
-        sys_score = float(np.mean(sys_part)) / sys_ref if sys_part.size else 0.0
-        if max(mic_score, sys_score) < 0.05:
+        lo = int(segment["start"] * 10)
+        hi = min(max(int(np.ceil(segment["end"] * 10)), lo + 1), n)
+        if lo >= hi:
             continue
-        segment["speaker"] = "Me" if mic_score > sys_score else "Others"
+        me, others = float(mic_active[lo:hi].mean()), float(sys_active[lo:hi].mean())
+        if max(me, others) < MIN_ACTIVE_SHARE:
+            continue
+        segment["speaker"] = "Me" if me > others else "Others"
         labelled += 1
     return labelled
