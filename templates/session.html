@@ -78,7 +78,7 @@
               <select id="system-select" aria-label="Output device to capture"></select>
               <div class="meter" id="meter-system" role="meter" aria-label="System audio level" aria-valuemin="-60" aria-valuemax="0"></div>
             </div>
-            <p class="muted small source-hint">System audio records what plays on that output: the other people in a Teams/Zoom call, a video, etc. With both on, lines are labelled <b>Me</b> / <b>Others</b>.</p>
+            <p class="muted small source-hint">System audio records what plays on that output: the other people in a Teams/Zoom call, a video, etc. With both on, your lines are labelled <b>Me</b> and the other voices are told apart (Speaker 1, 2…, which you can name).</p>
             <div class="banner banner-warn small" id="devices-error" hidden></div>
 
             <div class="record-controls" id="record-idle">
@@ -110,8 +110,54 @@
               <span class="audio-name" id="audio-name"></span>
               <span class="muted small" id="audio-info"></span>
             </div>
-            <audio id="player" controls preload="metadata"></audio>
-            <button type="button" class="btn btn-ghost" id="export-audio">Export MP3</button>
+            <audio id="player" controls preload="metadata" controlslist="nodownload noplaybackrate" disableremoteplayback></audio>
+            <div class="menu-wrap">
+              <button type="button" class="icon-btn more-btn" id="audio-menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="More audio options" title="More options">
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="3" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="13" r="1.5" fill="currentColor"/></svg>
+              </button>
+              <div class="menu" id="audio-menu" role="menu" hidden>
+                <button type="button" role="menuitem" id="menu-trim">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="4" cy="4" r="2.2" stroke="currentColor" stroke-width="1.4"/><circle cx="4" cy="12" r="2.2" stroke="currentColor" stroke-width="1.4"/><path d="M5.8 5.3 14 12.5M5.8 10.7 14 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+                  Trim…
+                </button>
+                <button type="button" role="menuitem" id="export-audio">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8m0 0 3-3m-3 3L5 7M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>Export MP3</span>
+                </button>
+                <div class="menu-sep"></div>
+                <div class="menu-label">Playback speed</div>
+                <div class="menu-speeds" id="menu-speeds">
+                  <button type="button" data-rate="0.75">0.75×</button><button type="button" data-rate="1" class="is-active">1×</button><button type="button" data-rate="1.25">1.25×</button><button type="button" data-rate="1.5">1.5×</button><button type="button" data-rate="2">2×</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="trim-panel" id="trim-panel" hidden>
+            <div class="trim-head">
+              <strong>Trim</strong>
+              <span class="muted small" id="trim-summary"></span>
+            </div>
+            <div class="trim-wave" id="trim-wave">
+              <canvas id="trim-canvas" aria-hidden="true"></canvas>
+              <div class="trim-shade" id="trim-shade-left"></div>
+              <div class="trim-shade" id="trim-shade-right"></div>
+              <div class="trim-playhead" id="trim-playhead"></div>
+              <div class="trim-handle" id="trim-handle-start" data-edge="start" role="slider" tabindex="0" aria-label="Trim start"></div>
+              <div class="trim-handle" id="trim-handle-end" data-edge="end" role="slider" tabindex="0" aria-label="Trim end"></div>
+            </div>
+            <div class="trim-controls">
+              <label class="trim-time">Start <input id="trim-start" inputmode="numeric" aria-label="Start time" /></label>
+              <button type="button" class="btn btn-ghost btn-sm" id="trim-start-here" title="Use the current playback position">Set to playhead</button>
+              <label class="trim-time">End <input id="trim-end" inputmode="numeric" aria-label="End time" /></label>
+              <button type="button" class="btn btn-ghost btn-sm" id="trim-end-here" title="Use the current playback position">Set to playhead</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="trim-play">▶ Play selection</button>
+              <span class="spacer"></span>
+              <button type="button" class="btn btn-ghost btn-sm" id="trim-reset">Undo trim</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="trim-cancel">Cancel</button>
+              <button type="button" class="btn btn-primary btn-sm" id="trim-save">Save trim</button>
+            </div>
+            <p class="muted small">Drag the handles or type times. Only the kept part is played, transcribed and exported; the recording itself is not cut, so <b>Undo trim</b> brings everything back.</p>
           </div>
         </section>
 
@@ -133,6 +179,11 @@
               </label>
               <label class="check"><input type="checkbox" id="opt-accurate" /> Accurate decoding <span class="muted small">(beam search, slower)</span></label>
               <label class="check"><input type="checkbox" id="opt-translate" /> Translate to English</label>
+              <label class="check"><input type="checkbox" id="opt-speakers" /> Detect speakers <span class="muted small">(tell the voices apart)</span></label>
+              <label>Number of speakers
+                <select id="opt-speaker-count"></select>
+                <span class="muted small">Recording your microphone and system audio? Count only the other people.</span>
+              </label>
               <label class="span-2">Glossary for this session
                 <textarea id="opt-glossary" rows="3" placeholder="One term per line: names, acronyms, products, clients…"></textarea>
                 <span class="muted small" id="glossary-hint"></span>
@@ -154,6 +205,21 @@
             <button type="button" class="btn btn-ghost btn-sm" id="stop-job">Stop</button>
           </div>
           <div class="progress"><div class="progress-fill" id="job-progress"></div></div>
+        </section>
+
+        <!-- Speakers -->
+        <section class="card" id="speakers-card" hidden>
+          <div class="card-head">
+            <h2>Speakers</h2>
+            <span class="muted small" id="speakers-meta"></span>
+            <div class="card-actions">
+              <select id="detect-count" class="select-sm" aria-label="Number of speakers to detect"></select>
+              <button type="button" class="btn btn-ghost btn-sm" id="detect-speakers">Detect speakers</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="add-speaker">+ Add speaker</button>
+            </div>
+          </div>
+          <div class="speaker-list" id="speaker-list"></div>
+          <p class="muted small hint" id="speakers-hint">Type a name to rename a speaker everywhere. ▶ plays a sample of their voice. Click a speaker label in the transcript to move that line to someone else (Shift-click a second label to move all the lines in between).</p>
         </section>
 
         <!-- Transcript + review -->
@@ -235,7 +301,8 @@
         <div class="form-grid">
           <label>Default model <select id="set-default-model"></select></label>
           <label>Default language <input id="set-default-language" list="language-list" placeholder="Auto-detect" /></label>
-          <label class="check span-2"><input type="checkbox" id="set-accurate" /> Accurate decoding by default</label>
+          <label class="check"><input type="checkbox" id="set-accurate" /> Accurate decoding by default</label>
+          <label class="check"><input type="checkbox" id="set-speakers" /> Detect speakers by default</label>
           <label class="span-2">Default glossary <span class="muted small">(added to every session; also used by Review)</span>
             <textarea id="set-glossary" rows="6" placeholder="One term per line"></textarea>
           </label>
@@ -245,6 +312,8 @@
         </div>
       </form>
     </dialog>
+
+    <div class="menu speaker-menu" id="speaker-menu" role="menu" hidden></div>
 
     <script id="bootstrap" type="application/json">{{ bootstrap_json|safe }}</script>
     <script src="/static/app.js?v={{ asset_version }}"></script>

@@ -272,9 +272,6 @@ details > summary::marker { color: var(--accent); }
 .line .text:focus { background: var(--surface); box-shadow: 0 0 0 2px var(--accent-border); }
 .line.is-edited .text { box-shadow: inset 2px 0 0 var(--accent-strong); }
 .line.is-edited .text:focus { box-shadow: 0 0 0 2px var(--accent-border); }
-.speaker { grid-column: 2; font-size: 11px; font-weight: 700; }
-.speaker-me { color: var(--accent); }
-.speaker-others { color: var(--blue); }
 .ts {
   grid-column: 1;
   font: 500 11px var(--mono); color: var(--muted);
@@ -384,3 +381,107 @@ dialog.settings .card-head h2 { margin-right: auto; }
   .source-row { grid-template-columns: 1fr; gap: 6px; }
 }
 .card-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* Audio menu (⋮) --------------------------------------------------------- */
+.menu-wrap { position: relative; }
+.more-btn:hover, .more-btn[aria-expanded="true"] { border-color: var(--accent-border); color: var(--accent); background: var(--accent-bg); }
+.menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
+  min-width: 220px; padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--panel-strong); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), var(--glow);
+}
+.menu > button {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 10px; border: none; border-radius: 6px; background: transparent;
+  font: 500 13px "Space Grotesk", sans-serif; color: var(--text); text-align: left; cursor: pointer;
+}
+.menu > button:hover:not(:disabled), .menu > button:focus-visible { background: var(--accent-bg); outline: none; }
+.menu > button:disabled { opacity: 0.45; cursor: not-allowed; }
+.menu > button svg { color: var(--accent); flex: none; }
+.menu.open-right { right: auto; left: 0; }
+.menu-sep { height: 1px; margin: 4px 2px; background: var(--line); }
+.menu-label { padding: 4px 10px 2px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.menu-speeds { display: flex; gap: 3px; padding: 2px 6px 4px; }
+.menu-speeds button {
+  flex: 1; padding: 4px 0; border-radius: 6px; border: 1px solid var(--line);
+  background: transparent; color: var(--muted); font: 500 11px var(--mono); cursor: pointer;
+}
+.menu-speeds button.is-active { background: var(--accent-bg); border-color: var(--accent-border); color: var(--text); }
+.trim-badge { color: var(--amber); }
+
+/* Trim -------------------------------------------------------------------- */
+.trim-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.trim-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.trim-wave {
+  position: relative; height: 84px; border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--line); overflow: hidden; cursor: pointer;
+  touch-action: none;
+}
+.trim-wave canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.trim-shade { position: absolute; top: 0; bottom: 0; background: rgba(6, 4, 12, 0.62); pointer-events: none; }
+#trim-shade-left { left: 0; }
+#trim-shade-right { right: 0; }
+.trim-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--blue); pointer-events: none; box-shadow: 0 0 8px rgba(125, 211, 252, 0.6); }
+.trim-handle {
+  position: absolute; top: 0; bottom: 0; width: 14px; margin-left: -7px; cursor: ew-resize; z-index: 2;
+}
+.trim-handle::before {
+  content: ""; position: absolute; left: 6px; top: 0; bottom: 0; width: 3px; border-radius: 2px;
+  background: var(--accent); box-shadow: 0 0 10px rgba(167, 139, 250, 0.7);
+}
+.trim-handle::after {
+  content: ""; position: absolute; left: 1px; top: 50%; width: 12px; height: 26px; margin-top: -13px;
+  border-radius: 4px; background: var(--accent-gradient); border: 1px solid rgba(255, 255, 255, 0.35);
+}
+.trim-handle:focus-visible { outline: none; }
+.trim-handle:focus-visible::after { box-shadow: 0 0 0 3px var(--accent-border); }
+.trim-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 6px; }
+.trim-time { flex-direction: row; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.trim-time input { width: 92px; padding: 4px 8px; font: 500 12px var(--mono); }
+.trim-controls .spacer { flex: 1; }
+
+/* Speakers ---------------------------------------------------------------- */
+.select-sm { padding: 4px 8px; font-size: 12px; }
+.speaker-list { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
+.speaker-row {
+  display: grid; grid-template-columns: 14px minmax(140px, 220px) minmax(120px, 1fr) auto; gap: 12px; align-items: center;
+  padding: 5px 6px; border-radius: 8px;
+}
+.speaker-row:hover { background: var(--hover); }
+.speaker-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--spk); box-shadow: 0 0 8px var(--spk); }
+.speaker-name { padding: 5px 8px; font-weight: 500; }
+.speaker-name-wrap { display: flex; flex-direction: column; gap: 1px; }
+.speaker-name-wrap .muted { padding-left: 9px; }
+.talk { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.talk-bar { flex: 1; height: 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.06); overflow: hidden; }
+.talk-bar span { display: block; height: 100%; border-radius: 999px; background: var(--spk); opacity: 0.85; }
+.talk-text { font: 500 11px var(--mono); color: var(--muted); white-space: nowrap; }
+.speaker-actions { display: flex; align-items: center; gap: 6px; }
+.speaker-actions select { padding: 4px 8px; font-size: 12px; max-width: 160px; }
+.speaker-empty { padding: 10px 6px; }
+.icon-btn.play-btn:hover { border-color: var(--accent-border); color: var(--accent); }
+.icon-btn.play-btn.is-playing { color: var(--blue); border-color: rgba(125, 211, 252, 0.45); }
+
+/* Speaker labels on lines */
+.line .speaker {
+  grid-column: 2; align-self: baseline;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid transparent;
+  background: color-mix(in srgb, var(--spk) 14%, transparent);
+  color: var(--spk); font: 700 11px "Space Grotesk", sans-serif; cursor: pointer;
+  max-width: 130px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.line .speaker:hover, .line .speaker.is-selected { border-color: color-mix(in srgb, var(--spk) 60%, transparent); }
+.line .speaker.is-none { --spk: var(--muted); background: transparent; opacity: 0; font-weight: 500; }
+.line:hover .speaker.is-none, .line .speaker.is-none.is-selected { opacity: 0.8; border-color: var(--line-strong); }
+.line.is-range { background: var(--accent-bg); }
+.speaker-menu { position: fixed; right: auto; top: auto; min-width: 200px; max-height: 320px; overflow-y: auto; }
+.speaker-menu .menu-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--spk); flex: none; }
+.speaker-menu button.is-current { background: rgba(255, 255, 255, 0.05); }
+.speaker-menu button.is-current::after { content: "✓"; margin-left: auto; color: var(--accent); }
+
+@media (max-width: 760px) {
+  .speaker-row { grid-template-columns: 14px 1fr; }
+  .talk, .speaker-actions { grid-column: 2; }
+}

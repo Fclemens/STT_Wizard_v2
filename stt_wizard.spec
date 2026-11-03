@@ -31,6 +31,7 @@ binaries = (
     gpu_binaries
     + collect_dynamic_libs("ctranslate2")   # ctranslate2.dll, cuDNN loader stub, OpenMP
     + collect_dynamic_libs("onnxruntime")   # Silero voice-activity detection
+    + collect_dynamic_libs("sherpa_onnx")   # speaker detection (ships its own onnxruntime.dll in sherpa_onnx/lib)
 )
 datas = (
     [(str(ROOT / "templates"), "templates"), (str(ROOT / "static"), "static")]
@@ -39,7 +40,7 @@ datas = (
 )
 hiddenimports = (
     collect_submodules("uvicorn")
-    + ["app", "pyaudiowpatch", "webview.platforms.edgechromium", "webview.platforms.winforms"]
+    + ["app", "speakers", "sherpa_onnx", "pyaudiowpatch", "webview.platforms.edgechromium", "webview.platforms.winforms"]
 )
 # Never bundle these even if they are installed in the build environment.
 excludes = ["torch", "whisper", "numba", "llvmlite", "tkinter", "matplotlib", "IPython", "pytest"]

@@ -19,6 +19,7 @@ from analyzer import analyze_transcript
 from reviewer import review_segments
 from settings_store import load_settings, openai_ready
 from recorder import label_speakers
+import speakers
 from stt_engine import SAMPLE_RATE, load_audio, transcribe
 
 STAGE_MESSAGES = {
@@ -28,6 +29,8 @@ STAGE_MESSAGES = {
     "loading_audio": "Decoding the audio.",
     "transcribing": "Transcribing — lines appear as they are ready.",
     "stopping": "Stopping after the current window…",
+    "speakers": "Telling the voices apart…",
+    "speaker_model": "Downloading the speaker model (first use only, ~40 MB)…",
     "reviewing": "Asking the LLM to check names, acronyms and terms…",
     "analyzing": "Summarising the transcript…",
 }
@@ -81,8 +84,10 @@ def start_transcription(session_id: str, options: dict[str, Any]) -> None:
         live["error"] = None
         live["notice"] = None
         live["job"] = job
+        trim = live["audio"].get("trim")
         live["transcript"] = {
             "source": "whisper",
+            "range": [trim["start"], trim["end"]] if trim else None,
             "model": options["model"],
             "language": options.get("language") or "",
             "task": options.get("task", "transcribe"),
@@ -122,6 +127,7 @@ def _run_transcription(session_id: str, job_id: str, options: dict[str, Any]) ->
         return
 
     audio_path = store.audio_dir(session_id) / session["audio"]["file"]
+    trim = session["audio"].get("trim")
 
     def on_progress(stage: str, progress: int) -> None:
         _set_job(session_id, "stopping" if stop_flag.is_set() else stage, progress)
@@ -140,7 +146,7 @@ def _run_transcription(session_id: str, job_id: str, options: dict[str, Any]) ->
             )
             live["job"] = job
             job_snapshot = dict(job)
-        events.publish(session_id, "segments", {"segments": new_segments, "job": job_snapshot})
+        events.publish(session_id, "segments", {"segments": [store.public_segment(seg) for seg in new_segments], "job": job_snapshot})
 
     try:
         meta = transcribe(
@@ -153,22 +159,19 @@ def _run_transcription(session_id: str, job_id: str, options: dict[str, Any]) ->
             on_progress=on_progress,
             on_segments=on_segments,
             should_stop=stop_flag.is_set,
+            span=(trim["start"], trim["end"]) if trim else None,
         )
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()
         _fail(session_id, f"Transcription failed: {exc}")
         return
+    if not meta.get("stopped"):
+        _label_lines(session_id, options, lambda stage, pct: _set_job(session_id, stage, pct))
     _finish_transcription(session_id, meta)
 
 
 def _finish_transcription(session_id: str, meta: dict[str, Any]) -> None:
-    speakers = _speaker_labels(session_id)
     with store.edit(session_id) as live:
-        if speakers:
-            for segment in live["transcript"]["segments"]:
-                if segment["id"] in speakers:
-                    segment["speaker"] = speakers[segment["id"]]
-            live["transcript"]["speakers"] = True
         transcript = live["transcript"]
         transcript["completed_at"] = store.now_iso()
         transcript["stopped"] = bool(meta.get("stopped"))
@@ -191,34 +194,160 @@ def _finish_transcription(session_id: str, meta: dict[str, Any]) -> None:
             start_analysis(session_id)
 
 
-def _speaker_labels(session_id: str) -> dict[str, str]:
-    """Me/Others per line, when the session was recorded with both sources."""
+# ── Speakers ───────────────────────────────────────────────────────────────
+
+
+def _label_lines(session_id: str, options: dict[str, Any], on_progress) -> None:
+    """Label the transcript's lines by speaker; on failure keep the lines and explain in a notice."""
     session = store.get_session(session_id)
-    tracks = ((session or {}).get("audio") or {}).get("tracks") or {}
-    segments = ((session or {}).get("transcript") or {}).get("segments") or []
-    if not ("mic" in tracks and "system" in tracks and segments):
-        return {}
+    if not session or not (session.get("transcript") or {}).get("segments"):
+        return
+    notice = None
     try:
-        folder = store.audio_dir(session_id)
+        segments, speaker_map = compute_speakers(
+            session, bool(options.get("speakers", True)), options.get("speaker_count"), on_progress
+        )
+    except Exception as exc:  # noqa: BLE001 - speaker labels must never cost the transcript
+        traceback.print_exc()
+        notice = f"Speaker detection failed ({exc}). The transcript is fine; try Detect speakers later."
+        try:  # still label Me/Others from the two tracks, which needs no model
+            segments, speaker_map = compute_speakers(session, False, None, on_progress)
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            segments, speaker_map = None, None
+    with store.edit(session_id) as live:
+        transcript = live["transcript"]
+        if segments is not None:
+            transcript["segments"] = segments
+            transcript["speaker_map"] = speaker_map
+            _forget_old_speakers(transcript)
+        if notice:
+            live["notice"] = notice
+
+
+def compute_speakers(
+    session: dict[str, Any], detect: bool, count: int | None, on_progress, locked: frozenset = frozenset()
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, str]]]:
+    """New lines (some split where the voice changes) with speaker ids, plus the id -> name map.
+
+    * Recorded with microphone + system audio: the microphone gives "Me"; the other
+      voices are told apart on the system track (cleaner than the mix).
+    * Anything else: voices are told apart on the whole audio.
+    A single voice is not labelled (or stays "Others" next to "Me").
+    ``locked`` lines (referenced by review suggestions) are never split.
+    """
+    transcript = session["transcript"]
+    segments = [dict(seg) for seg in transcript["segments"]]
+    for seg in segments:
+        seg["speaker"] = None
+    audio = session["audio"]
+    folder = store.audio_dir(session["id"])
+    tracks = audio.get("tracks") or {}
+    old_names = store.speaker_names(transcript)
+    speaker_map: dict[str, dict[str, str]] = {}
+
+    if detect and not speakers.model_ready():
+        on_progress("speaker_model", 0)
+
+    if "mic" in tracks and "system" in tracks:
         mic = load_audio(folder / tracks["mic"]["file"])
         system = load_audio(folder / tracks["system"]["file"])
-        copies = [dict(segment) for segment in segments]
-        label_speakers(copies, mic, system, SAMPLE_RATE)
-        return {seg["id"]: seg["speaker"] for seg in copies if seg.get("speaker")}
-    except Exception:  # noqa: BLE001 - labels are a nice-to-have
+        label_speakers(segments, mic, system, SAMPLE_RATE)
+        for seg in segments:
+            seg["speaker"] = {"Me": "me", "Others": "others"}.get(seg.get("speaker"))
+        speaker_map["me"] = {"name": old_names.get("me", "Me")}
+        voiced, track = [seg for seg in segments if seg["speaker"] == "others"], system
+    else:
+        voiced, track = segments, None
+
+    groups: dict[str, int] = {}
+    changes: dict[str, list] = {}
+    if detect and voiced:
+        if track is None:
+            track = load_audio(folder / audio["file"])
+        groups, changes = speakers.detect(voiced, track, SAMPLE_RATE, count, lambda pct: on_progress("speakers", pct))
+
+    if len(set(groups.values())) > 1:
+        for number in sorted(set(groups.values())):
+            speaker_map[f"s{number}"] = {"name": f"Speaker {number}"}
+        result = []
+        for seg in segments:
+            if seg["id"] not in groups:
+                result.append(seg)
+                continue
+            if seg["id"] in changes and seg["id"] not in locked:
+                pieces = speakers.split_line(seg, changes[seg["id"]], groups[seg["id"]])
+            else:
+                pieces = [(seg, groups[seg["id"]])]
+            for piece, number in pieces:
+                piece["speaker"] = f"s{number}"
+                result.append(piece)
+        segments = result
+    elif any(seg["speaker"] == "others" for seg in segments):
+        speaker_map["others"] = {"name": old_names.get("others", "Others")}
+    if not any(seg.get("speaker") for seg in segments):
+        speaker_map = {}
+    return segments, speaker_map
+
+
+def _forget_old_speakers(transcript: dict[str, Any]) -> None:
+    """Lines hidden by a trim were not re-labelled: drop speakers that no longer exist."""
+    for seg in transcript.get("trimmed_out") or []:
+        if seg.get("speaker") not in transcript["speaker_map"]:
+            seg["speaker"] = None
+
+
+def start_speaker_detection(session_id: str, count: int | None) -> None:
+    """Detect speakers again on an existing transcript (names given so far are reset, except "Me")."""
+    with store.edit(session_id) as live:
+        if is_busy(live):
+            raise RuntimeError("This session is already busy.")
+        if not (live.get("transcript") or {}).get("segments") or not live.get("audio"):
+            raise RuntimeError("There is no transcribed audio to detect speakers in.")
+        live["status"] = "diarizing"
+        live["error"] = None
+        job = _new_job("speakers")
+        job.update(stage="speakers", message=STAGE_MESSAGES["speakers"])
+        live["job"] = job
+    _publish_session(session_id)
+    threading.Thread(target=_run_speaker_detection, args=(session_id, count), daemon=True).start()
+
+
+def _run_speaker_detection(session_id: str, count: int | None) -> None:
+    session = store.get_session(session_id)
+    if not session:
+        return
+    locked = frozenset(item["segment_id"] for item in (session.get("review") or {}).get("suggestions", []))
+    try:
+        segments, speaker_map = compute_speakers(
+            session, True, count, lambda stage, pct: _set_job(session_id, stage, pct), locked
+        )
+    except Exception as exc:  # noqa: BLE001
         traceback.print_exc()
-        return {}
+        _fail(session_id, f"Speaker detection failed: {exc}")
+        return
+    with store.edit(session_id) as live:
+        transcript = live["transcript"]
+        transcript["segments"] = segments
+        transcript["speaker_map"] = speaker_map
+        _forget_old_speakers(transcript)
+        live["status"] = "ready"
+        live["job"] = None
+    _publish_session(session_id)
 
 
 def default_transcribe_options(session: dict[str, Any], overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = load_settings()
     overrides = overrides or {}
+    count = overrides.get("speaker_count", 0)
     return {
         "model": str(overrides.get("model") or settings.get("default_model") or "turbo"),
         "language": str(overrides.get("language", settings.get("default_language", "")) or "").strip().lower(),
         "task": "translate" if overrides.get("task") == "translate" else "transcribe",
         "accurate": bool(overrides.get("accurate", settings.get("accurate_decoding", True))),
         "glossary": effective_glossary(session),
+        "speakers": bool(overrides.get("speakers", settings.get("detect_speakers", True))),
+        "speaker_count": int(count) if str(count or "0").isdigit() and int(count) > 0 else None,
     }
 
 
@@ -319,7 +448,7 @@ def _run_analysis(session_id: str) -> None:
     session = store.get_session(session_id)
     if not session:
         return
-    text = store.segments_text(session["transcript"]["segments"])
+    text = store.speaker_text(session["transcript"])
     try:
         analysis = analyze_transcript(text)
     except Exception as exc:  # noqa: BLE001
@@ -347,10 +476,14 @@ def _fail(session_id: str, message: str) -> None:
 
 
 def effective_glossary(session: dict[str, Any]) -> str:
-    """Default glossary from Settings plus the session's own terms."""
+    """Default glossary from Settings, the session's own terms and the speaker names given."""
     default = str(load_settings().get("default_glossary", "")).strip()
     own = str(session.get("glossary", "")).strip()
-    return "\n".join(part for part in (default, own) if part)
+    names = "\n".join(
+        name for key, name in store.speaker_names(session.get("transcript")).items()
+        if name not in ("Me", "Others", f"Speaker {key[1:]}")
+    )
+    return "\n".join(part for part in (default, own, names) if part)
 
 
 def start_workers() -> None:

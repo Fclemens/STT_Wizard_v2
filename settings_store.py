@@ -19,6 +19,7 @@ DEFAULT_SETTINGS = {
     "default_model": "turbo",
     "default_language": "",
     "accurate_decoding": True,
+    "detect_speakers": True,
     "record_mic": True,
     "record_system": True,
     "mic_device": "",

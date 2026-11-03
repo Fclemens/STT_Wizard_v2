@@ -29,7 +29,7 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 SCHEMA_VERSION = 1
 
 # Pipeline states. "busy" states mean a background job owns the session.
-BUSY_STATUSES = {"recording", "transcribing", "reviewing", "analyzing"}
+BUSY_STATUSES = {"recording", "transcribing", "diarizing", "reviewing", "analyzing"}
 
 _cache: dict[str, dict[str, Any]] = {}
 _locks: dict[str, threading.RLock] = {}
@@ -197,7 +197,7 @@ def recover_interrupted_sessions() -> None:
         if not session or session.get("status") not in BUSY_STATUSES - {"recording"}:
             continue  # recordings are salvaged by recording.recover_interrupted()
         with edit(session_id) as live:
-            step = {"transcribing": "Transcription", "reviewing": "Review", "analyzing": "Analysis"}[live["status"]]
+            step = {"transcribing": "Transcription", "diarizing": "Speaker detection", "reviewing": "Review", "analyzing": "Analysis"}[live["status"]]
             live["job"] = None
             live["status"] = "failed"
             live["error"] = f"{step} was interrupted because the app was restarted. Run it again."
@@ -206,8 +206,27 @@ def recover_interrupted_sessions() -> None:
 # ── Transcript helpers ─────────────────────────────────────────────────────
 
 
-def segments_text(segments: list[dict[str, Any]], field: str = "text") -> str:
-    return "\n".join(str(seg.get(field, "")).strip() for seg in segments if str(seg.get(field, "")).strip())
+def speaker_names(transcript: dict[str, Any] | None) -> dict[str, str]:
+    """Speaker id -> display name. Older sessions stored the name itself ("Me", "Others") as the id."""
+    speakers = (transcript or {}).get("speaker_map") or {}
+    return {key: str(value.get("name") or key) for key, value in speakers.items()}
+
+
+def speaker_text(transcript: dict[str, Any]) -> str:
+    """Transcript as "Name: text" lines (plain lines where no speaker is known)."""
+    names = speaker_names(transcript)
+    lines = []
+    for seg in transcript.get("segments") or []:
+        text = str(seg.get("text", "")).strip()
+        speaker = seg.get("speaker")
+        if text:
+            lines.append(f"{names.get(speaker, speaker)}: {text}" if speaker else text)
+    return "\n".join(lines)
+
+
+def public_segment(segment: dict[str, Any]) -> dict[str, Any]:
+    """A line as sent to the browser (word timings stay on the server)."""
+    return {key: value for key, value in segment.items() if key != "words"}
 
 
 def review_signature(suggestion: dict[str, Any]) -> str:
@@ -215,11 +234,15 @@ def review_signature(suggestion: dict[str, Any]) -> str:
 
 
 def public_view(session: dict[str, Any]) -> dict[str, Any]:
-    """Session as sent to the browser (no absolute paths)."""
+    """Session as sent to the browser (no absolute paths, no word timings or trimmed-off lines)."""
     view = json.loads(json.dumps(session))
     audio = view.get("audio")
     if isinstance(audio, dict):
         audio.pop("path", None)
         audio["url"] = f"/api/sessions/{view['id']}/audio"
     view.pop("dismissed_signatures", None)
+    transcript = view.get("transcript")
+    if isinstance(transcript, dict):
+        transcript["segments"] = [public_segment(seg) for seg in transcript.get("segments") or []]
+        transcript["trimmed_count"] = len(transcript.pop("trimmed_out", None) or [])
     return view

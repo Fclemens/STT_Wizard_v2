@@ -21,7 +21,7 @@ import pipeline
 from paths import RESOURCE_DIR
 import recording
 import session_store as store
-from recorder import RecorderError, export_mp3, list_devices
+from recorder import RecorderError, export_mp3, list_devices, waveform
 from reviewer import apply_to_text
 from settings_store import DEFAULT_LLM_MODEL, load_env_file, load_settings, openai_ready, save_settings, update_env_key
 from stt_engine import (
@@ -277,16 +277,94 @@ def api_audio_export(session_id: str) -> FileResponse:
     if not all(path.exists() for path in sources):
         raise HTTPException(status_code=404, detail="The audio files are missing.")
 
-    # Recordings own a folder (rec-*/); uploads share audio/, so key the cache by file.
+    # Recordings own a folder (rec-*/); uploads share audio/, so key the cache by file (and trim).
     stored = root / audio["file"]
-    cached = stored.parent / ("export.mp3" if tracks else f"export-{stored.stem}.mp3")
+    trim = audio.get("trim")
+    prefix = "export" if tracks else f"export-{stored.stem}"
+    cached = stored.parent / (f"{prefix}-{int(trim['start'] * 10)}-{int(trim['end'] * 10)}.mp3" if trim else f"{prefix}.mp3")
     if not cached.exists():
+        for old in stored.parent.glob(f"{prefix}*.mp3"):
+            old.unlink(missing_ok=True)  # an export of an earlier trim
         try:
-            export_mp3(sources, cached)
+            export_mp3(sources, cached, (trim["start"], trim["end"]) if trim else None)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"MP3 export failed: {exc}") from exc
     safe = "".join(ch for ch in session["name"] if ch.isalnum() or ch in " ()-_").strip() or "recording"
     return FileResponse(cached, filename=f"{safe}.mp3", media_type="audio/mpeg")
+
+
+@app.get("/api/sessions/{session_id}/audio/waveform")
+def api_audio_waveform(session_id: str) -> dict[str, Any]:
+    """Peak levels for the trim view (computed once, cached next to the audio)."""
+    session = require_session(session_id)
+    audio = session.get("audio")
+    if not audio:
+        raise HTTPException(status_code=404, detail="No audio in this session.")
+    stored = store.audio_dir(session_id) / audio["file"]
+    cached = stored.parent / ("waveform.json" if audio.get("tracks") else f"waveform-{stored.stem}.json")
+    if cached.exists():
+        data = json.loads(cached.read_text(encoding="utf-8"))
+    else:
+        try:
+            data = waveform(stored)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Could not read the audio: {exc}") from exc
+        cached.write_text(json.dumps(data), encoding="utf-8")
+    if not audio.get("duration") and data["duration"]:
+        with store.edit(session_id) as live:
+            live["audio"]["duration"] = data["duration"]
+        events.publish(session_id, "session", store.public_view(require_session(session_id)))
+    return data
+
+
+@app.post("/api/sessions/{session_id}/trim")
+def api_trim(session_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    """Keep only start..end of the audio (null/null: keep everything). The files are not cut."""
+    session = require_session(session_id)
+    require_idle(session)
+    audio = session.get("audio")
+    if not audio:
+        raise HTTPException(status_code=404, detail="No audio in this session.")
+    duration = float(audio.get("duration") or 0)
+    trim = None
+    if payload.get("start") is not None or payload.get("end") is not None:
+        try:
+            start = max(0.0, float(payload.get("start") or 0))
+            end = float(payload["end"]) if payload.get("end") is not None else duration
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid trim times.") from exc
+        if duration:
+            end = min(end, duration)
+        if end - start < 1:
+            raise HTTPException(status_code=400, detail="Keep at least one second of audio.")
+        if start > 0.05 or (duration and end < duration - 0.05):
+            trim = {"start": round(start, 2), "end": round(end, 2)}
+    with store.edit(session_id) as live:
+        if trim:
+            live["audio"]["trim"] = trim
+        else:
+            live["audio"].pop("trim", None)
+        _apply_trim(live)
+    return session_response(session_id)
+
+
+def _apply_trim(live: dict[str, Any]) -> None:
+    """Hide transcript lines outside the kept part (kept aside, so undoing the trim brings them back)."""
+    transcript = live.get("transcript")
+    if not transcript or transcript.get("source") == "import":
+        return
+    trim = live["audio"].get("trim")
+    every = sorted(transcript.get("segments", []) + transcript.get("trimmed_out", []), key=lambda seg: seg["start"])
+
+    def kept(seg: dict[str, Any]) -> bool:
+        middle = (seg["start"] + seg["end"]) / 2
+        return not trim or trim["start"] <= middle <= trim["end"]
+
+    before = len(transcript.get("segments", []))
+    transcript["segments"] = [seg for seg in every if kept(seg)]
+    transcript["trimmed_out"] = [seg for seg in every if not kept(seg)]
+    if len(transcript["segments"]) != before and live.get("analysis"):
+        live["analysis"]["outdated"] = True
 
 
 @app.get("/api/sessions/{session_id}/audio")
@@ -376,6 +454,17 @@ def api_transcribe(session_id: str, payload: dict[str, Any] = Body(default={})) 
     return JSONResponse(store.public_view(require_session(session_id)))
 
 
+@app.post("/api/sessions/{session_id}/speakers/detect")
+def api_detect_speakers(session_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    require_session(session_id)
+    count = payload.get("count")
+    try:
+        pipeline.start_speaker_detection(session_id, int(count) if count else None)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(store.public_view(require_session(session_id)))
+
+
 @app.post("/api/sessions/{session_id}/stop")
 def api_stop(session_id: str) -> dict[str, Any]:
     require_session(session_id)
@@ -418,9 +507,102 @@ def api_edit_segment(session_id: str, segment_id: str, payload: dict[str, Any] =
         if not segment:
             raise HTTPException(status_code=404, detail="Line not found.")
         segment["text"] = text
-        result = dict(segment)
+        result = store.public_segment(segment)
     events.publish(session_id, "segment", result)
     return JSONResponse(result)
+
+
+def _speaker_map(live: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """The session's speakers, adding any id only found on lines (older sessions: "Me", "Others")."""
+    transcript = live.get("transcript")
+    if not transcript:
+        raise HTTPException(status_code=404, detail="No transcript yet.")
+    if live.get("status") in ("transcribing", "diarizing"):
+        raise HTTPException(status_code=409, detail="Wait for the current step to finish.")
+    speakers_map = transcript.setdefault("speaker_map", {})
+    for seg in transcript.get("segments", []):
+        if seg.get("speaker") and seg["speaker"] not in speakers_map:
+            speakers_map[seg["speaker"]] = {"name": seg["speaker"]}
+    return speakers_map
+
+
+@app.post("/api/sessions/{session_id}/speakers")
+def api_add_speaker(session_id: str, payload: dict[str, Any] = Body(default={})) -> JSONResponse:
+    """New speaker; optionally assign lines to it right away."""
+    require_session(session_id)
+    with store.edit(session_id) as live:
+        speakers_map = _speaker_map(live)
+        numbers = [int(key[1:]) for key in speakers_map if key[:1] == "s" and key[1:].isdigit()]
+        key = f"s{max(numbers, default=0) + 1}"
+        name = str(payload.get("name") or "").strip()[:60] or f"Speaker {key[1:]}"
+        speakers_map[key] = {"name": name}
+        _assign(live, payload.get("segments") or [], key)
+    return session_response(session_id)
+
+
+@app.patch("/api/sessions/{session_id}/speakers/{key}")
+def api_rename_speaker(session_id: str, key: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    require_session(session_id)
+    name = str(payload.get("name") or "").strip()[:60]
+    if not name:
+        raise HTTPException(status_code=400, detail="Enter a name.")
+    with store.edit(session_id) as live:
+        speakers_map = _speaker_map(live)
+        if key not in speakers_map:
+            raise HTTPException(status_code=404, detail="Speaker not found.")
+        speakers_map[key]["name"] = name
+    return session_response(session_id)
+
+
+@app.post("/api/sessions/{session_id}/speakers/{key}/merge")
+def api_merge_speaker(session_id: str, key: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    """All of ``key``'s lines go to ``into``; ``key`` disappears."""
+    require_session(session_id)
+    into = str(payload.get("into") or "")
+    with store.edit(session_id) as live:
+        speakers_map = _speaker_map(live)
+        if key not in speakers_map or into not in speakers_map or key == into:
+            raise HTTPException(status_code=400, detail="Pick two different speakers.")
+        for seg in live["transcript"]["segments"] + live["transcript"].get("trimmed_out", []):
+            if seg.get("speaker") == key:
+                seg["speaker"] = into
+        del speakers_map[key]
+    return session_response(session_id)
+
+
+@app.delete("/api/sessions/{session_id}/speakers/{key}")
+def api_remove_speaker(session_id: str, key: str) -> JSONResponse:
+    """Remove a speaker; its lines (if any) become unlabelled."""
+    require_session(session_id)
+    with store.edit(session_id) as live:
+        speakers_map = _speaker_map(live)
+        if key not in speakers_map:
+            raise HTTPException(status_code=404, detail="Speaker not found.")
+        for seg in live["transcript"]["segments"] + live["transcript"].get("trimmed_out", []):
+            if seg.get("speaker") == key:
+                seg["speaker"] = None
+        del speakers_map[key]
+    return session_response(session_id)
+
+
+@app.post("/api/sessions/{session_id}/segments-speaker")
+def api_set_lines_speaker(session_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    """Give lines to a speaker (``speaker``: id, or null to unlabel them)."""
+    require_session(session_id)
+    key = payload.get("speaker") or None
+    with store.edit(session_id) as live:
+        speakers_map = _speaker_map(live)
+        if key is not None and key not in speakers_map:
+            raise HTTPException(status_code=404, detail="Speaker not found.")
+        _assign(live, payload.get("segments") or [], key)
+    return session_response(session_id)
+
+
+def _assign(live: dict[str, Any], segment_ids: list[str], key: str | None) -> None:
+    wanted = set(segment_ids)
+    for seg in live["transcript"]["segments"]:
+        if seg["id"] in wanted:
+            seg["speaker"] = key
 
 
 @app.post("/api/sessions/{session_id}/suggestions/{suggestion_id}")
@@ -468,8 +650,9 @@ def api_apply_all(session_id: str) -> JSONResponse:
     session = require_session(session_id)
     require_idle(session)
     with store.edit(session_id) as live:
+        visible = {seg["id"] for seg in (live.get("transcript") or {}).get("segments", [])}
         for suggestion in (live.get("review") or {}).get("suggestions", []):
-            if suggestion["status"] == "pending":
+            if suggestion["status"] == "pending" and suggestion["segment_id"] in visible:  # not trimmed off
                 _apply(live, suggestion, suggestion["suggested"])
     return session_response(session_id)
 
@@ -498,22 +681,28 @@ def api_export(session_id: str, format: str = "txt", version: str = "corrected")
     if not segments:
         raise HTTPException(status_code=404, detail="Nothing to export yet.")
     field = "original_text" if version == "original" else "text"
+    names = store.speaker_names(transcript)
     timed = transcript.get("source") != "import"
     base = f"{session['name']} ({'original' if version == 'original' else 'corrected'})"
 
     if format == "txt":
-        body, media = to_txt(segments, field), "text/plain"
+        body, media = to_txt(segments, field, names), "text/plain"
     elif format == "srt" and timed:
-        body, media = to_srt(segments, field), "application/x-subrip"
+        body, media = to_srt(segments, field, names), "application/x-subrip"
     elif format == "vtt" and timed:
-        body, media = to_vtt(segments, field), "text/vtt"
+        body, media = to_vtt(segments, field, names), "text/vtt"
     elif format == "json":
         payload = {
             "name": session["name"],
             "language": transcript.get("language"),
             "model": transcript.get("model"),
             "segments": [
-                {"start": seg["start"], "end": seg["end"], "speaker": seg.get("speaker"), "text": seg.get(field, "")}
+                {
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "speaker": names.get(seg["speaker"], seg["speaker"]) if seg.get("speaker") else None,
+                    "text": seg.get(field, ""),
+                }
                 for seg in segments
             ],
         }
@@ -551,6 +740,7 @@ def api_save_settings(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         "default_model": str,
         "default_language": str,
         "accurate_decoding": bool,
+        "detect_speakers": bool,
     }
     for key, kind in allowed.items():
         if key in payload:

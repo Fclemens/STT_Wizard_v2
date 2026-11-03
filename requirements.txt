@@ -6,6 +6,8 @@ requests>=2.32.0
 numpy>=1.26
 faster-whisper>=1.1.0
 av>=12
+# Speaker detection (voice fingerprints); has its own onnxruntime, separate from faster-whisper's
+sherpa-onnx>=1.12
 PyAudioWPatch>=0.2.12.7; sys_platform == "win32"
 # NVIDIA GPU support: CTranslate2 needs only cuBLAS for Whisper (tested; cuDNN not required).
 nvidia-cublas-cu12; sys_platform == "win32"

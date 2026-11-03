@@ -32,7 +32,9 @@ def analyze_transcript(text: str) -> dict[str, Any]:
                             "type": "input_text",
                             "text": (
                                 "Analyze the transcript and return only JSON. "
-                                "Provide a concise executive summary, key points, action items, and open questions."
+                                "Provide a concise executive summary, key points, action items, and open questions. "
+                                "Lines may start with the speaker's name ('Name: text'); when they do, say who "
+                                "said or committed to what, and name the owner of each action item when it is clear."
                             ),
                         }
                     ],

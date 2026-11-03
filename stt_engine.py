@@ -239,6 +239,11 @@ def glossary_hotwords(glossary: str, model) -> tuple[str | None, int, int]:
 
 MAX_LINE_SECONDS = 20.0
 MAX_JOIN_GAP_SECONDS = 1.5
+# Whisper sometimes drops punctuation for a whole recording (seen on a 22-minute Italian call:
+# 2 of 83 lines had any, so every line ran to MAX_LINE_SECONDS). A line that is already this long
+# also ends at a pause this long, which keeps lines short enough to tell speakers apart.
+PAUSE_LINE_SECONDS = 6.0
+PAUSE_SPLIT_SECONDS = 0.6
 
 
 class SentenceLines:
@@ -252,25 +257,33 @@ class SentenceLines:
     def __init__(self) -> None:
         self.pending: list = []
 
-    def feed(self, segment) -> list[tuple[float, float, str]]:
+    def feed(self, segment) -> list[tuple[float, float, str, list]]:
         words = list(segment.words or [])
         if not words:  # no word timings: keep the segment as one line
-            return self.flush() + [(float(segment.start), float(segment.end), segment.text.strip())]
-        lines: list[tuple[float, float, str]] = []
+            return self.flush() + [(float(segment.start), float(segment.end), segment.text.strip(), [])]
+        lines: list[tuple[float, float, str, list]] = []
         if self.pending and words[0].start - self.pending[-1].end > MAX_JOIN_GAP_SECONDS:
             lines += self.flush()
         for word in words:
+            if (
+                self.pending
+                and self.pending[-1].end - self.pending[0].start >= PAUSE_LINE_SECONDS
+                and word.start - self.pending[-1].end >= PAUSE_SPLIT_SECONDS
+            ):
+                lines += self.flush()
             self.pending.append(word)
-            sentence_end = word.word.strip().endswith((".", "?", "!")) and len(self.pending) >= 3
+            sentence_end = word.word.strip().endswith((".", "?", "!", "。", "？", "！")) and len(self.pending) >= 3
             too_long = self.pending[-1].end - self.pending[0].start >= MAX_LINE_SECONDS
             if sentence_end or too_long:
                 lines += self.flush()
         return lines
 
-    def flush(self) -> list[tuple[float, float, str]]:
+    def flush(self) -> list[tuple[float, float, str, list]]:
+        """Returns (start, end, text, words); words are [start, end, text] (used to split lines by speaker)."""
         words, self.pending = self.pending, []
         text = "".join(w.word for w in words).strip()
-        return [(float(words[0].start), float(words[-1].end), text)] if text else []
+        timings = [[float(w.start), float(w.end), w.word] for w in words]
+        return [(float(words[0].start), float(words[-1].end), text, timings)] if text else []
 
 
 class _CudaFailure(Exception):
@@ -293,13 +306,20 @@ def transcribe(
     on_progress: Callable[[str, int], None],
     on_segments: Callable[[list[dict[str, Any]], int, str], None],
     should_stop: Callable[[], bool],
+    span: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
-    """Transcribe ``audio_path``, streaming accepted lines via ``on_segments``.
+    """Transcribe ``audio_path`` (only ``span`` = (start, end) seconds of it, when trimmed),
+    streaming accepted lines via ``on_segments``. Line times are always from the start of the file.
 
-    Returns metadata (language, device, duration, stopped).
+    Returns metadata (language, device, duration of the whole file, stopped).
     """
     on_progress("loading_audio", 2)
     audio = load_audio(audio_path)
+    full_duration = len(audio) / SAMPLE_RATE
+    offset = 0.0
+    if span:
+        offset = max(0.0, span[0])
+        audio = audio[int(offset * SAMPLE_RATE) : int(span[1] * SAMPLE_RATE)]
     duration = len(audio) / SAMPLE_RATE
 
     device = "cuda" if cuda_usable() else "cpu"
@@ -307,15 +327,17 @@ def transcribe(
         on_progress("downloading_model", 3)
     on_progress("loading_model", 4)
     try:
-        return _run(audio, duration, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop)
+        meta = _run(audio, duration, offset, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop)
     except _CudaFailure:
         # GPU unusable at runtime: remember it and redo the whole job on the CPU.
         _cuda_state["broken"] = True
         on_progress("loading_model", 4)
-        return _run(audio, duration, "cpu", model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop)
+        meta = _run(audio, duration, offset, "cpu", model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop)
+    meta["duration"] = round(full_duration, 2)
+    return meta
 
 
-def _run(audio, duration, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop):
+def _run(audio, duration, offset, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop):
     try:
         model = get_model(model_name, device)
         hotwords, terms_used, terms_total = glossary_hotwords(glossary, model)
@@ -342,19 +364,20 @@ def _run(audio, duration, device, model_name, language, task, glossary, accurate
         stopped = False
         emitted = False
 
-        def emit(raw_lines: list[tuple[float, float, str]], progress: int) -> None:
+        def emit(raw_lines: list[tuple[float, float, str, list]], progress: int) -> None:
             nonlocal counter
             lines = []
-            for start, end, text in raw_lines:
+            for start, end, text, words in raw_lines:
                 counter += 1
                 lines.append(
                     {
                         "id": f"s{counter:05}",
-                        "start": round(start, 2),
-                        "end": round(min(end, duration), 2),
+                        "start": round(start + offset, 2),
+                        "end": round(min(end, duration) + offset, 2),
                         "text": text,
                         "original_text": text,
                         "speaker": None,
+                        "words": [[round(a + offset, 2), round(b + offset, 2), word] for a, b, word in words],
                     }
                 )
             on_segments(lines, progress, info.language)
@@ -377,7 +400,6 @@ def _run(audio, duration, device, model_name, language, task, glossary, accurate
     return {
         "language": info.language or "unknown",
         "device": f"{device} · {_compute_type(device)}",
-        "duration": round(duration, 2),
         "glossary_terms": f"{terms_used}/{terms_total}" if terms_total else None,
         "stopped": stopped,
     }
@@ -394,24 +416,25 @@ def _timestamp(seconds: float, separator: str = ",") -> str:
     return f"{hours:02}:{minutes:02}:{secs:02}{separator}{ms:03}"
 
 
-def _label(segment: dict[str, Any], text: str) -> str:
-    return f"{segment['speaker']}: {text}" if segment.get("speaker") else text
+def _label(segment: dict[str, Any], text: str, names: dict[str, str] | None) -> str:
+    speaker = segment.get("speaker")
+    return f"{(names or {}).get(speaker, speaker)}: {text}" if speaker else text
 
 
-def to_txt(segments: list[dict[str, Any]], field: str = "text") -> str:
-    lines = [_label(seg, str(seg.get(field, "")).strip()) for seg in segments]
+def to_txt(segments: list[dict[str, Any]], field: str = "text", names: dict[str, str] | None = None) -> str:
+    lines = [_label(seg, str(seg.get(field, "")).strip(), names) for seg in segments]
     return "\n".join(line for line in lines if line.strip()) + "\n"
 
 
-def to_srt(segments: list[dict[str, Any]], field: str = "text") -> str:
+def to_srt(segments: list[dict[str, Any]], field: str = "text", names: dict[str, str] | None = None) -> str:
     blocks = []
     for index, seg in enumerate(segments, start=1):
-        blocks.append(f"{index}\n{_timestamp(seg['start'])} --> {_timestamp(seg['end'])}\n{_label(seg, str(seg.get(field, '')).strip())}")
+        blocks.append(f"{index}\n{_timestamp(seg['start'])} --> {_timestamp(seg['end'])}\n{_label(seg, str(seg.get(field, '')).strip(), names)}")
     return "\n\n".join(blocks) + "\n"
 
 
-def to_vtt(segments: list[dict[str, Any]], field: str = "text") -> str:
+def to_vtt(segments: list[dict[str, Any]], field: str = "text", names: dict[str, str] | None = None) -> str:
     blocks = ["WEBVTT"]
     for seg in segments:
-        blocks.append(f"{_timestamp(seg['start'], '.')} --> {_timestamp(seg['end'], '.')}\n{_label(seg, str(seg.get(field, '')).strip())}")
+        blocks.append(f"{_timestamp(seg['start'], '.')} --> {_timestamp(seg['end'], '.')}\n{_label(seg, str(seg.get(field, '')).strip(), names)}")
     return "\n\n".join(blocks) + "\n"

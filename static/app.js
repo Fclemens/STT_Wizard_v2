@@ -16,6 +16,9 @@
     inputMode: "record",
     monitoring: false,
     devices: { available: true, error: null, mics: [], systems: [] },
+    stopAt: null,          // pause playback here (speaker sample, "Play selection")
+    sampleTurn: {},        // speaker -> which sample to play next
+    rangeAnchor: null,     // last line whose speaker label was clicked (Shift-click ranges)
   };
   const $ = (id) => document.getElementById(id);
   const sid = () => state.session.id;
@@ -64,12 +67,26 @@
     try { return await action(); } catch (error) { toast(error.message, "error"); return null; }
   }
 
-  const busy = () => ["recording", "transcribing", "reviewing", "analyzing"].includes(state.session.status);
+  const busy = () => ["recording", "transcribing", "diarizing", "reviewing", "analyzing"].includes(state.session.status);
   const segments = () => (state.session.transcript && state.session.transcript.segments) || [];
-  const suggestions = () => (state.session.review && state.session.review.suggestions) || [];
+  // Suggestions on lines hidden by a trim are kept on the server but not shown.
+  const suggestions = () => {
+    const all = (state.session.review && state.session.review.suggestions) || [];
+    const visible = new Set(segments().map((seg) => seg.id));
+    return all.filter((item) => visible.has(item.segment_id));
+  };
+
+  // Times typed as "1:02:03.5", "2:15" or "75".
+  const parseTime = (text) => {
+    const parts = String(text).trim().split(":").map((part) => parseFloat(part.replace(",", ".")));
+    if (!parts.length || parts.some((n) => Number.isNaN(n) || n < 0)) return null;
+    return parts.reduce((total, n) => total * 60 + n, 0);
+  };
+  const fmtPrecise = (seconds) => `${fmtTime(seconds)}.${Math.floor((seconds % 1) * 10)}`;
+  const fmtTalk = (seconds) => (seconds >= 90 ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds)} s`);
 
   // ── Sidebar ──────────────────────────────────────────────────────────
-  const STATUS_LABEL = { idle: "", recording: "Recording", transcribing: "Transcribing", reviewing: "Reviewing", analyzing: "Analysing", ready: "", failed: "Failed" };
+  const STATUS_LABEL = { idle: "", recording: "Recording", transcribing: "Transcribing", diarizing: "Speakers", reviewing: "Reviewing", analyzing: "Analysing", ready: "", failed: "Failed" };
 
   function renderSidebar() {
     const current = state.sessions.find((item) => item.id === sid());
@@ -101,7 +118,7 @@
       review: Boolean(s.review),
       analysis: Boolean(s.analysis),
     };
-    const activeStep = { recording: "audio", transcribing: "transcript", reviewing: "review", analyzing: "analysis" }[s.status];
+    const activeStep = { recording: "audio", transcribing: "transcript", diarizing: "transcript", reviewing: "review", analyzing: "analysis" }[s.status];
     document.querySelectorAll("#stepper li").forEach((li) => {
       li.classList.toggle("is-done", done[li.dataset.step]);
       li.classList.toggle("is-active", li.dataset.step === activeStep);
@@ -128,24 +145,31 @@
     $("upload-panel").hidden = !choosing || recording || state.inputMode !== "upload";
     $("audio-bar").hidden = !hasAudio || choosing;
     renderRecordControls();
+    if (!hasAudio || choosing) closeTrim();
     if (hasAudio) {
       $("audio-name").textContent = s.audio.original_name;
       const mb = s.audio.size ? `${(s.audio.size / 1048576).toFixed(1)} MB` : "";
       const sources = s.audio.tracks ? Object.values(s.audio.tracks).map((t) => t.device).filter(Boolean).join(" + ") : "";
-      $("audio-info").textContent = [s.audio.duration ? fmtTime(s.audio.duration) : "", mb, sources].filter(Boolean).join(" · ");
+      const t = s.audio.trim;
+      const kept = t ? `<span class="trim-badge" title="Only this part is played, transcribed and exported">✂ ${fmtTime(t.start)}–${fmtTime(t.end)}</span>` : "";
+      $("audio-info").innerHTML = [s.audio.duration ? fmtTime(s.audio.duration) : "", mb, esc(sources), kept].filter(Boolean).join(" · ");
       const player = $("player");
       if (player.dataset.src !== s.audio.url + s.audio.file) {
         player.dataset.src = s.audio.url + s.audio.file;
         player.src = `${s.audio.url}?v=${encodeURIComponent(s.audio.file)}`;
+        trim.wave = null;
       }
+      $("menu-trim").disabled = busy();
     }
+    renderTrim();
   }
 
   async function exportAudio() {
     const button = $("export-audio");
-    const label = button.textContent;
+    const labelEl = button.querySelector("span");
+    const label = labelEl.textContent;
     button.disabled = true;
-    button.textContent = "Preparing…";
+    labelEl.textContent = "Preparing…";
     try {
       const response = await fetch(`/api/sessions/${sid()}/audio/export`);
       if (!response.ok) {
@@ -166,8 +190,168 @@
       toast(error.message, "error");
     } finally {
       button.disabled = false;
-      button.textContent = label;
+      labelEl.textContent = label;
+      closeAudioMenu();
     }
+  }
+
+  // ── Audio menu (⋮) ───────────────────────────────────────────────────
+  function toggleAudioMenu(open = $("audio-menu").hidden) {
+    const menu = $("audio-menu");
+    menu.hidden = !open;
+    $("audio-menu-btn").setAttribute("aria-expanded", String(open));
+    // Opens to the left of the button; on narrow screens the button wraps left, so flip it.
+    menu.classList.remove("open-right");
+    if (open && menu.getBoundingClientRect().left < 8) menu.classList.add("open-right");
+  }
+  const closeAudioMenu = () => toggleAudioMenu(false);
+
+  function setPlaybackRate(rate) {
+    $("player").playbackRate = rate;
+    document.querySelectorAll("#menu-speeds button").forEach((b) => b.classList.toggle("is-active", Number(b.dataset.rate) === rate));
+  }
+
+  // ── Trim ─────────────────────────────────────────────────────────────
+  // While the trim panel is open the whole recording can be played (to find the cut points);
+  // otherwise playback stays inside the saved trim.
+  const trim = { open: false, draft: null, wave: null, drag: null };
+  const savedTrim = () => (state.session.audio && state.session.audio.trim) || null;
+  const playRange = () => (trim.open ? null : savedTrim());
+  const audioDuration = () =>
+    (trim.wave && trim.wave.duration) || (state.session.audio && state.session.audio.duration) || $("player").duration || 0;
+
+  async function openTrim() {
+    closeAudioMenu();
+    if (busy()) return;
+    trim.open = true;
+    $("trim-panel").hidden = false;
+    if (!trim.wave) {
+      $("trim-summary").textContent = "Reading the audio…";
+      trim.wave = await run(() => api(`/api/sessions/${sid()}/audio/waveform`));
+      if (!trim.wave || !trim.open) return closeTrim();
+    }
+    const saved = savedTrim();
+    trim.draft = saved ? { start: saved.start, end: saved.end } : { start: 0, end: audioDuration() };
+    renderTrim();
+    drawWave();
+    $("trim-panel").scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  function closeTrim() {
+    if (!trim.open) return;
+    trim.open = false;
+    trim.draft = null;
+    trim.drag = null;
+    $("trim-panel").hidden = true;
+  }
+
+  function renderTrim() {
+    if (!trim.open || !trim.draft) return;
+    const duration = audioDuration() || 1;
+    const { start, end } = trim.draft;
+    const pct = (x) => `${(x / duration) * 100}%`;
+    $("trim-shade-left").style.width = pct(start);
+    $("trim-shade-right").style.width = pct(duration - end);
+    $("trim-handle-start").style.left = pct(start);
+    $("trim-handle-end").style.left = pct(end);
+    $("trim-handle-start").setAttribute("aria-valuetext", fmtTime(start));
+    $("trim-handle-end").setAttribute("aria-valuetext", fmtTime(end));
+    if (document.activeElement !== $("trim-start")) $("trim-start").value = fmtPrecise(start);
+    if (document.activeElement !== $("trim-end")) $("trim-end").value = fmtPrecise(end);
+    const whole = start <= 0.05 && end >= duration - 0.05;
+    $("trim-summary").textContent = whole
+      ? `Whole recording (${fmtTime(duration)}): drag the handles to cut the start or the end.`
+      : `Keeping ${fmtTime(start)} – ${fmtTime(end)}: ${fmtTime(end - start)} of ${fmtTime(duration)}`;
+    const saved = savedTrim();
+    $("trim-reset").hidden = !saved;
+    const unchanged = saved ? Math.abs(saved.start - start) < 0.05 && Math.abs(saved.end - end) < 0.05 : whole;
+    $("trim-save").disabled = busy() || unchanged;
+    updatePlayhead();
+  }
+
+  function drawWave() {
+    const canvas = $("trim-canvas");
+    if (!trim.open || !trim.wave) return;
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
+    const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, width, height);
+    const peaks = trim.wave.peaks || [];
+    if (!peaks.length) return;
+    const gradient = ctx.createLinearGradient(0, 0, 0, height);
+    gradient.addColorStop(0, "#c4b5fd");
+    gradient.addColorStop(0.5, "#8b5cf6");
+    gradient.addColorStop(1, "#c4b5fd");
+    ctx.fillStyle = gradient;
+    const bar = Math.max(1, Math.round(2 * ratio));
+    const gap = Math.max(1, Math.round(ratio));
+    for (let x = 0; x < width; x += bar + gap) {
+      const from = Math.floor((x / width) * peaks.length);
+      const to = Math.max(from + 1, Math.floor(((x + bar) / width) * peaks.length));
+      let peak = 0;
+      for (let i = from; i < to && i < peaks.length; i++) peak = Math.max(peak, peaks[i]);
+      const h = Math.max(ratio, peak * (height - 8 * ratio));
+      ctx.fillRect(x, (height - h) / 2, bar, h);
+    }
+  }
+
+  function updatePlayhead() {
+    if (!trim.open) return;
+    const duration = audioDuration() || 1;
+    $("trim-playhead").style.left = `${(Math.min($("player").currentTime, duration) / duration) * 100}%`;
+  }
+
+  function setTrimEdge(edge, seconds) {
+    const duration = audioDuration();
+    const { start, end } = trim.draft;
+    if (edge === "start") trim.draft.start = Math.max(0, Math.min(seconds, end - 1));
+    else trim.draft.end = Math.min(duration, Math.max(seconds, start + 1));
+    renderTrim();
+  }
+
+  function timeAt(clientX) {
+    const rect = $("trim-wave").getBoundingClientRect();
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * audioDuration();
+  }
+
+  async function saveTrim(clear = false) {
+    const duration = audioDuration();
+    const { start, end } = clear ? { start: 0, end: duration } : trim.draft;
+    const whole = start <= 0.05 && end >= duration - 0.05;
+    const json = whole ? { start: null, end: null } : { start, end };
+    const session = await run(() => api(`/api/sessions/${sid()}/trim`, { method: "POST", json }));
+    if (!session) return;
+    closeTrim();
+    applySession(session);
+    const hidden = (session.transcript && session.transcript.trimmed_count) || 0;
+    toast(whole ? "Trim removed: the whole recording is used again." :
+      `Keeping ${fmtTime(start)} – ${fmtTime(end)}.${hidden ? ` ${hidden} transcript line(s) outside it are hidden.` : ""}`);
+  }
+
+  // Playback: stay inside the saved trim, and stop at the end of a sample or of "Play selection".
+  function onPlayerTime() {
+    const player = $("player");
+    const range = playRange();
+    if (state.stopAt !== null && player.currentTime >= state.stopAt) {
+      player.pause();
+      state.stopAt = null;
+      renderSpeakerPlaying();
+    } else if (range && player.currentTime >= range.end) {
+      player.pause();
+      player.currentTime = range.end;
+    }
+    updatePlayhead();
+  }
+
+  function keepInRange() {
+    const player = $("player");
+    const range = playRange();
+    if (!range) return;
+    if (player.currentTime < range.start - 0.05) player.currentTime = range.start;
+    else if (player.currentTime > range.end + 0.05) player.currentTime = range.end;
   }
 
   // ── Recording ────────────────────────────────────────────────────────
@@ -336,7 +520,8 @@
     card.hidden = !s.audio;
     if (card.hidden) return;
     const hasTranscript = Boolean(s.transcript && s.transcript.segments.length);
-    $("transcribe-summary-title").textContent = hasTranscript ? "Transcribe again with different settings" : "Transcription settings";
+    const kept = s.audio.trim ? ` · only ${fmtTime(s.audio.trim.start)}–${fmtTime(s.audio.trim.end)} (trimmed)` : "";
+    $("transcribe-summary-title").textContent = (hasTranscript ? "Transcribe again with different settings" : "Transcription settings") + kept;
     const phase = `${sid()}|${s.audio.file}|${hasTranscript}`;
     if (card.dataset.phase !== phase) {
       card.dataset.phase = phase;
@@ -363,27 +548,35 @@
       .join("");
   }
 
+  function fillSpeakerCount(select) {
+    select.innerHTML = `<option value="0">Auto-detect</option>` +
+      Array.from({ length: 8 }, (_, i) => `<option value="${i + 1}">${i + 1} speaker${i ? "s" : ""}</option>`).join("");
+  }
+
   function initTranscribeOptions() {
     fillModelSelect($("opt-model"), state.settings.default_model || "turbo");
     $("opt-language").value = state.settings.default_language || "";
     $("opt-accurate").checked = state.settings.accurate_decoding !== false;
+    $("opt-speakers").checked = state.settings.detect_speakers !== false;
+    $("opt-speaker-count").disabled = !$("opt-speakers").checked;
   }
 
   // ── Job card ─────────────────────────────────────────────────────────
-  const JOB_TITLES = { record: "Recording", transcribe: "Transcribing", review: "Reviewing", analysis: "Analysing" };
+  const JOB_TITLES = { record: "Recording", transcribe: "Transcribing", speakers: "Detecting speakers", review: "Reviewing", analysis: "Analysing" };
 
   function renderJob() {
     const job = state.session.job;
     const card = $("job-card");
     card.hidden = !job || (job.kind === "record" && job.stage !== "saving");
     if (card.hidden) return;
-    $("job-title").textContent = JOB_TITLES[job.kind] || "Working";
+    const speakerStage = ["speakers", "speaker_model"].includes(job.stage);
+    $("job-title").textContent = speakerStage ? "Detecting speakers" : JOB_TITLES[job.kind] || "Working";
     $("job-message").textContent = job.message || "";
     const indeterminate = job.kind !== "transcribe" && !job.progress;
     const fill = $("job-progress");
     fill.classList.toggle("indeterminate", indeterminate);
     fill.style.width = indeterminate ? "" : `${Math.max(2, job.progress || 0)}%`;
-    $("stop-job").hidden = job.kind !== "transcribe";
+    $("stop-job").hidden = job.kind !== "transcribe" || speakerStage;
     $("stop-job").disabled = job.stage === "stopping";
   }
 
@@ -420,12 +613,21 @@
     return html + esc(text.slice(cursor));
   }
 
-  function lineHtml(seg, pending) {
+  const speakerKey = (seg, speakers) => {
+    const spk = seg.speaker ? speakers.get(seg.speaker) : null;
+    return spk ? `${spk.key}|${spk.name}|${spk.color}` : "";
+  };
+
+  function lineHtml(seg, pending, speakers) {
     const timed = seg.start !== null && seg.start !== undefined;
     const edited = seg.text !== seg.original_text;
-    return `<div class="line ${edited ? "is-edited" : ""}" id="line-${seg.id}" data-id="${seg.id}" data-speaker="${esc(seg.speaker || "")}">
+    const spk = seg.speaker ? speakers.get(seg.speaker) : null;
+    const label = spk
+      ? `<button type="button" class="speaker" data-speaker-btn style="--spk:${spk.color}" title="${esc(spk.name)}: click to change">${esc(spk.name)}</button>`
+      : `<button type="button" class="speaker is-none" data-speaker-btn title="Set the speaker">+</button>`;
+    return `<div class="line ${edited ? "is-edited" : ""}" id="line-${seg.id}" data-id="${seg.id}" data-speaker="${esc(speakerKey(seg, speakers))}">
       ${timed ? `<button type="button" class="ts" data-seek="${seg.start}" title="Play from here">${fmtTime(seg.start)}</button>` : `<span class="ts ts-static">${seg.id.replace(/^s0*/, "#")}</span>`}
-      ${seg.speaker ? `<span class="speaker speaker-${seg.speaker === "Me" ? "me" : "others"}">${esc(seg.speaker)}</span>` : ""}
+      ${label}
       <div class="text" contenteditable="plaintext-only" spellcheck="true">${highlight(seg.text, pending.get(seg.id))}</div>
     </div>`;
   }
@@ -440,7 +642,11 @@
       return;
     }
     const t = s.transcript;
-    const metaBits = [t.model, t.language, t.device, t.accurate ? "beam search" : "", t.glossary_terms ? `glossary ${t.glossary_terms} terms` : t.glossary_used ? "glossary" : "", t.stopped ? "stopped early" : ""];
+    const trimNow = s.audio && s.audio.trim;
+    const partial = t.range && (!trimNow || trimNow.start < t.range[0] - 0.5 || trimNow.end > t.range[1] + 0.5)
+      ? `transcribed ${fmtTime(t.range[0])}–${fmtTime(t.range[1])} only: transcribe again to include the rest` : "";
+    const metaBits = [t.model, t.language, t.device, t.accurate ? "beam search" : "", t.glossary_terms ? `glossary ${t.glossary_terms} terms` : t.glossary_used ? "glossary" : "", t.stopped ? "stopped early" : "",
+      t.trimmed_count ? `${t.trimmed_count} lines outside the trim hidden` : "", partial];
     $("transcript-meta").textContent = `${list.length} lines · ${metaBits.filter(Boolean).join(" · ")}`;
     $("follow-audio").parentElement.hidden = !s.audio;
 
@@ -449,6 +655,11 @@
       return;
     }
     const pending = pendingBySegment();
+    const speakers = speakerIndex();
+    // Speaker detection can split lines (new ids in the middle): simplest to redraw everything then.
+    const order = list.map((seg) => seg.id).join(",");
+    if (container.dataset.order && !order.startsWith(container.dataset.order) && !full) full = true;
+    container.dataset.order = order;
     if (full || container.querySelector(".placeholder")) container.innerHTML = "";
     const existing = new Map([...container.children].map((el) => [el.dataset.id, el]));
     const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
@@ -456,14 +667,14 @@
     for (const seg of list) {
       const el = existing.get(seg.id);
       if (!el) {
-        container.insertAdjacentHTML("beforeend", lineHtml(seg, pending));
+        container.insertAdjacentHTML("beforeend", lineHtml(seg, pending, speakers));
         appended = true;
         continue;
       }
       const textEl = el.querySelector(".text");
       if (document.activeElement === textEl) continue; // never clobber the line being edited
-      if ((el.dataset.speaker || "") !== (seg.speaker || "")) {
-        el.outerHTML = lineHtml(seg, pending);
+      if ((el.dataset.speaker || "") !== speakerKey(seg, speakers)) {
+        el.outerHTML = lineHtml(seg, pending, speakers);
         continue;
       }
       const html = highlight(seg.text, pending.get(seg.id));
@@ -595,6 +806,188 @@
     if (session) applySession(session);
   }
 
+  // ── Speakers ─────────────────────────────────────────────────────────
+  // Colours follow the speaker id ("s3" is always the third colour), so they survive merges.
+  const SPEAKER_COLORS = ["#7dd3fc", "#f9a8d4", "#86efac", "#fdba74", "#fde68a", "#fca5a5", "#67e8f9", "#d8b4fe", "#bef264", "#a5b4fc"];
+
+  function speakerColor(key) {
+    if (key === "me" || key === "Me") return "var(--accent)";
+    const number = /^s(\d+)$/.exec(key);
+    return SPEAKER_COLORS[number ? (Number(number[1]) - 1) % SPEAKER_COLORS.length : 0];
+  }
+
+  // Speakers in panel order; older sessions only have "Me"/"Others" on the lines.
+  function speakerList() {
+    const t = state.session.transcript;
+    const map = (t && t.speaker_map) || {};
+    const keys = Object.keys(map);
+    for (const seg of segments()) if (seg.speaker && !keys.includes(seg.speaker)) keys.push(seg.speaker);
+    return keys.map((key) => ({
+      key,
+      name: (map[key] && map[key].name) || key,
+      isMe: key === "me" || key === "Me",
+      color: speakerColor(key),
+    }));
+  }
+  const speakerIndex = () => new Map(speakerList().map((spk) => [spk.key, spk]));
+
+  function renderSpeakers() {
+    const s = state.session;
+    const t = s.transcript;
+    const card = $("speakers-card");
+    card.hidden = !(t && t.completed_at && segments().length);
+    if (card.hidden) return closeSpeakerMenu();
+    const canDetect = Boolean(s.audio) && t.source !== "import";
+    const list = speakerList();
+    $("detect-speakers").hidden = $("detect-count").hidden = !canDetect;
+    $("detect-speakers").disabled = busy();
+    $("detect-speakers").textContent = list.length ? "Detect again" : "Detect speakers";
+    $("add-speaker").disabled = busy();
+    $("speakers-hint").hidden = !list.length;
+    $("speakers-meta").textContent = list.length ? `${list.length} speaker${list.length > 1 ? "s" : ""}` : "";
+
+    const container = $("speaker-list");
+    if (container.contains(document.activeElement) && document.activeElement.classList.contains("speaker-name")) return;
+    if (!list.length) {
+      const why = t.speaker_map ? "Only one voice was found, so the lines are not labelled." : "Speakers were not detected for this transcript.";
+      container.innerHTML = `<p class="muted small speaker-empty">${why} ${canDetect ? "Click <b>Detect speakers</b>, or a" : "A"}dd speakers and assign lines with the <b>+</b> next to each line.</p>`;
+      return;
+    }
+    const talk = new Map();
+    const count = new Map();
+    let total = 0;
+    for (const seg of segments()) {
+      const seconds = seg.start !== null && seg.start !== undefined ? Math.max(0, seg.end - seg.start) : 0;
+      total += seconds;
+      if (!seg.speaker) continue;
+      talk.set(seg.speaker, (talk.get(seg.speaker) || 0) + seconds);
+      count.set(seg.speaker, (count.get(seg.speaker) || 0) + 1);
+    }
+    const playIcon = `<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>`;
+    container.innerHTML = list
+      .map((spk) => {
+        const seconds = talk.get(spk.key) || 0;
+        const lines = count.get(spk.key) || 0;
+        const share = total ? Math.round((seconds / total) * 100) : 0;
+        const others = list.filter((other) => other.key !== spk.key).map((other) => `<option value="${esc(other.key)}">${esc(other.name)}</option>`).join("");
+        return `<div class="speaker-row" data-key="${esc(spk.key)}" style="--spk:${spk.color}">
+          <span class="speaker-dot"></span>
+          <div class="speaker-name-wrap">
+            <input class="speaker-name" value="${esc(spk.name)}" maxlength="60" aria-label="Name of ${esc(spk.name)}" />
+            ${spk.isMe ? `<span class="muted small">your microphone</span>` : ""}
+          </div>
+          <div class="talk">
+            <div class="talk-bar"><span style="width:${share}%"></span></div>
+            <span class="talk-text">${t.source === "import" ? "" : `${fmtTalk(seconds)} · ${share}% · `}${lines} line${lines === 1 ? "" : "s"}</span>
+          </div>
+          <div class="speaker-actions">
+            ${canDetect && lines ? `<button type="button" class="icon-btn play-btn" data-sample title="Play a sample of this voice (again for another)" aria-label="Play a sample of ${esc(spk.name)}">${playIcon}</button>` : ""}
+            ${others ? `<select data-merge aria-label="Merge ${esc(spk.name)} into another speaker"><option value="">Merge into…</option>${others}</select>` : ""}
+            <button type="button" class="icon-btn" data-remove title="Remove this speaker${lines ? " (its lines become unlabelled)" : ""}" aria-label="Remove ${esc(spk.name)}">✕</button>
+          </div>
+        </div>`;
+      })
+      .join("");
+    renderSpeakerPlaying();
+  }
+
+  function renderSpeakerPlaying() {
+    document.querySelectorAll("#speaker-list .play-btn").forEach((button) =>
+      button.classList.toggle("is-playing", state.stopAt !== null && button.closest(".speaker-row").dataset.key === state.sampleKey && !$("player").paused)
+    );
+  }
+
+  // A few seconds of the speaker's voice; each click plays another of their (up to 5) best lines.
+  function playSample(key) {
+    const lines = segments().filter((seg) => seg.speaker === key && seg.start !== null && seg.start !== undefined);
+    if (!lines.length) return;
+    const ranked = [...lines].sort((a, b) => Math.abs(a.end - a.start - 6) - Math.abs(b.end - b.start - 6)).slice(0, 5);
+    const turn = state.sampleTurn[key] || 0;
+    state.sampleTurn[key] = turn + 1;
+    const pick = ranked[turn % ranked.length];
+    state.sampleKey = key;
+    seek(pick.start, Math.min(pick.end, pick.start + 8));
+    gotoLine(pick.id);
+    renderSpeakerPlaying();
+  }
+
+  async function speakerRequest(path, options) {
+    const session = await run(() => api(`/api/sessions/${sid()}${path}`, options));
+    if (session) applySession(session);
+    return session;
+  }
+
+  async function renameSpeaker(input) {
+    const key = input.closest(".speaker-row").dataset.key;
+    const spk = speakerIndex().get(key);
+    const name = input.value.trim();
+    if (!spk || !name || name === spk.name) {
+      if (spk) input.value = spk.name;
+      return;
+    }
+    await speakerRequest(`/speakers/${encodeURIComponent(key)}`, { method: "PATCH", json: { name } });
+  }
+
+  async function addSpeaker(segmentIds = []) {
+    const name = prompt("Name of the new speaker:");
+    if (name === null) return;
+    await speakerRequest("/speakers", { method: "POST", json: { name: name.trim(), segments: segmentIds } });
+  }
+
+  async function detectSpeakers() {
+    const named = speakerList().some((spk) => !spk.isMe && !/^(Speaker \d+|Others)$/.test(spk.name));
+    if (speakerList().length && !confirm(`Detect the speakers again? The current speakers${named ? " and the names you gave them" : ""} are replaced${speakerList().some((spk) => spk.isMe) ? " (Me stays)" : ""}.`)) return;
+    await speakerRequest("/speakers/detect", { method: "POST", json: { count: Number($("detect-count").value) || null } });
+  }
+
+  // Line label menu: pick a speaker for one line, or for a Shift-clicked range of lines.
+  function openSpeakerMenu(button, shift) {
+    const id = button.closest(".line").dataset.id;
+    const order = segments().map((seg) => seg.id);
+    let ids = [id];
+    if (shift && state.rangeAnchor && order.includes(state.rangeAnchor)) {
+      const [a, b] = [order.indexOf(state.rangeAnchor), order.indexOf(id)].sort((x, y) => x - y);
+      ids = order.slice(a, b + 1);
+    } else {
+      state.rangeAnchor = id;
+    }
+    closeSpeakerMenu();
+    ids.forEach((lineId) => $(`line-${lineId}`)?.classList.add("is-range"));
+    button.classList.add("is-selected");
+
+    const chosen = new Set(ids.map((lineId) => (segments().find((seg) => seg.id === lineId) || {}).speaker || ""));
+    const menu = $("speaker-menu");
+    menu.dataset.ids = ids.join(",");
+    menu.innerHTML =
+      `<div class="menu-label">${ids.length > 1 ? `${ids.length} lines` : "Speaker of this line"}</div>` +
+      speakerList()
+        .map((spk) => `<button type="button" role="menuitem" data-pick="${esc(spk.key)}" class="${chosen.size === 1 && chosen.has(spk.key) ? "is-current" : ""}" style="--spk:${spk.color}"><span class="menu-dot"></span>${esc(spk.name)}</button>`)
+        .join("") +
+      `<div class="menu-sep"></div><button type="button" role="menuitem" data-pick="__new">+ New speaker…</button>` +
+      (chosen.size > 1 || !chosen.has("") ? `<button type="button" role="menuitem" data-pick="">No speaker</button>` : "");
+    menu.hidden = false;
+    const rect = button.getBoundingClientRect();
+    const height = menu.offsetHeight;
+    menu.style.left = `${Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8)}px`;
+    menu.style.top = `${rect.bottom + height + 8 > window.innerHeight ? Math.max(8, rect.top - height - 4) : rect.bottom + 4}px`;
+    menu.querySelector("button")?.focus();
+  }
+
+  function closeSpeakerMenu() {
+    const menu = $("speaker-menu");
+    if (menu.hidden) return;
+    menu.hidden = true;
+    document.querySelectorAll(".line.is-range").forEach((el) => el.classList.remove("is-range"));
+    document.querySelectorAll(".speaker.is-selected").forEach((el) => el.classList.remove("is-selected"));
+  }
+
+  async function pickSpeaker(key) {
+    const ids = $("speaker-menu").dataset.ids.split(",");
+    closeSpeakerMenu();
+    if (key === "__new") return addSpeaker(ids);
+    await speakerRequest("/segments-speaker", { method: "POST", json: { segments: ids, speaker: key || null } });
+  }
+
   // ── Analysis ─────────────────────────────────────────────────────────
   function renderAnalysis() {
     const s = state.session;
@@ -604,7 +997,9 @@
     const a = s.analysis;
     $("run-analysis").disabled = busy();
     $("run-analysis").textContent = a ? "Run again" : "Run analysis";
-    $("analysis-meta").textContent = a ? `${a.model}${a.mode === "local" ? " (no API key: basic local summary)" : ""}` : "";
+    $("analysis-meta").textContent = a
+      ? `${a.model}${a.mode === "local" ? " (no API key: basic local summary)" : ""}${a.outdated ? " · made before the trim: run again" : ""}`
+      : "";
     $("copy-analysis").hidden = !a || s.status === "analyzing";
     if (s.status === "analyzing") {
       $("analysis-body").innerHTML = `<p class="placeholder">Summarising…</p>`;
@@ -662,6 +1057,7 @@
     renderInput();
     renderTranscribeCard();
     renderJob();
+    renderSpeakers();
     renderTranscript({ full: fullTranscript });
     renderReview();
     renderAnalysis();
@@ -724,6 +1120,8 @@
           language: $("opt-language").value.trim(),
           task: $("opt-translate").checked ? "translate" : "transcribe",
           accurate: $("opt-accurate").checked,
+          speakers: $("opt-speakers").checked,
+          speaker_count: Number($("opt-speaker-count").value) || 0,
         },
       })
     );
@@ -741,9 +1139,10 @@
     if (session && (session.rev || 0) >= (state.session.rev || 0)) state.session = session;
   }
 
-  function seek(seconds) {
+  function seek(seconds, stopAt = null) {
     const player = $("player");
     if (!state.session.audio || Number.isNaN(seconds)) return;
+    state.stopAt = stopAt;
     player.currentTime = seconds;
     player.play().catch(() => {});
   }
@@ -768,6 +1167,7 @@
     fillModelSelect($("set-default-model"), s.default_model || "turbo");
     $("set-default-language").value = s.default_language || "";
     $("set-accurate").checked = s.accurate_decoding !== false;
+    $("set-speakers").checked = s.detect_speakers !== false;
     $("set-glossary").value = s.default_glossary || "";
     $("settings-dialog").showModal();
   }
@@ -782,6 +1182,7 @@
       default_model: $("set-default-model").value,
       default_language: $("set-default-language").value.trim(),
       accurate_decoding: $("set-accurate").checked,
+      detect_speakers: $("set-speakers").checked,
       default_glossary: $("set-glossary").value,
     };
     const settings = await run(() => api("/api/settings", { method: "POST", json: payload }));
@@ -883,6 +1284,8 @@
     lines.addEventListener("click", (e) => {
       const seekBtn = e.target.closest("[data-seek]");
       if (seekBtn) return seek(parseFloat(seekBtn.dataset.seek));
+      const speakerBtn = e.target.closest("[data-speaker-btn]");
+      if (speakerBtn) return openSpeakerMenu(speakerBtn, e.shiftKey);
       const mark = e.target.closest("mark[data-suggestion]");
       if (mark) {
         state.reviewFilter = "pending";
@@ -906,6 +1309,119 @@
         e.target.blur();
       }
     });
+
+    // ⋮ menu
+    $("audio-menu-btn").addEventListener("click", (e) => { e.stopPropagation(); toggleAudioMenu(); });
+    $("menu-trim").addEventListener("click", openTrim);
+    $("menu-speeds").addEventListener("click", (e) => {
+      const button = e.target.closest("[data-rate]");
+      if (button) setPlaybackRate(Number(button.dataset.rate));
+    });
+    document.addEventListener("click", (e) => {
+      if (!$("audio-menu").hidden && !e.target.closest(".menu-wrap")) closeAudioMenu();
+      if (!$("speaker-menu").hidden && !e.target.closest("#speaker-menu") && !e.target.closest("[data-speaker-btn]")) closeSpeakerMenu();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      closeAudioMenu();
+      closeSpeakerMenu();
+    });
+
+    // Trim
+    const wave = $("trim-wave");
+    wave.addEventListener("pointerdown", (e) => {
+      if (!trim.draft) return;
+      const handle = e.target.closest(".trim-handle");
+      if (handle) {
+        trim.drag = handle.dataset.edge;
+        wave.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      } else {
+        const player = $("player");
+        player.currentTime = timeAt(e.clientX);
+        updatePlayhead();
+      }
+    });
+    wave.addEventListener("pointermove", (e) => { if (trim.drag) setTrimEdge(trim.drag, timeAt(e.clientX)); });
+    const endDrag = () => { trim.drag = null; };
+    wave.addEventListener("pointerup", endDrag);
+    wave.addEventListener("pointercancel", endDrag);
+    document.querySelectorAll(".trim-handle").forEach((handle) =>
+      handle.addEventListener("keydown", (e) => {
+        if (!trim.draft || !["ArrowLeft", "ArrowRight"].includes(e.key)) return;
+        e.preventDefault();
+        const step = (e.shiftKey ? 10 : 1) * (e.key === "ArrowLeft" ? -1 : 1);
+        setTrimEdge(handle.dataset.edge, trim.draft[handle.dataset.edge] + step);
+      })
+    );
+    for (const edge of ["start", "end"]) {
+      const input = $(`trim-${edge}`);
+      const apply = () => {
+        const seconds = parseTime(input.value);
+        if (seconds === null) toast("Type a time like 2:15 or 1:02:03.", "error");
+        else setTrimEdge(edge, seconds);
+        input.value = fmtPrecise(trim.draft[edge]);
+      };
+      input.addEventListener("change", apply);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); });
+      $(`trim-${edge}-here`).addEventListener("click", () => setTrimEdge(edge, $("player").currentTime));
+    }
+    $("trim-play").addEventListener("click", () => trim.draft && seek(trim.draft.start, trim.draft.end));
+    $("trim-cancel").addEventListener("click", closeTrim);
+    $("trim-save").addEventListener("click", () => saveTrim());
+    $("trim-reset").addEventListener("click", () => saveTrim(true));
+    window.addEventListener("resize", drawWave);
+
+    // Speakers
+    fillSpeakerCount($("detect-count"));
+    fillSpeakerCount($("opt-speaker-count"));
+    $("opt-speakers").addEventListener("change", () => ($("opt-speaker-count").disabled = !$("opt-speakers").checked));
+    $("detect-speakers").addEventListener("click", detectSpeakers);
+    $("add-speaker").addEventListener("click", () => addSpeaker());
+    const speakerListEl = $("speaker-list");
+    speakerListEl.addEventListener("click", async (e) => {
+      const row = e.target.closest(".speaker-row");
+      if (!row) return;
+      const key = row.dataset.key;
+      if (e.target.closest("[data-sample]")) return playSample(key);
+      if (e.target.closest("[data-remove]")) {
+        const spk = speakerIndex().get(key);
+        const lines = segments().filter((seg) => seg.speaker === key).length;
+        if (lines && !confirm(`Remove ${spk.name}? Their ${lines} line(s) will have no speaker.`)) return;
+        await speakerRequest(`/speakers/${encodeURIComponent(key)}`, { method: "DELETE" });
+      }
+    });
+    speakerListEl.addEventListener("change", async (e) => {
+      if (e.target.classList.contains("speaker-name")) return renameSpeaker(e.target);
+      if (!e.target.matches("[data-merge]") || !e.target.value) return;
+      const index = speakerIndex();
+      const from = index.get(e.target.closest(".speaker-row").dataset.key);
+      const into = index.get(e.target.value);
+      e.target.value = "";
+      if (!confirm(`Merge ${from.name} into ${into.name}? All of ${from.name}'s lines become ${into.name}'s.`)) return;
+      await speakerRequest(`/speakers/${encodeURIComponent(from.key)}/merge`, { method: "POST", json: { into: into.key } });
+    });
+    speakerListEl.addEventListener("keydown", (e) => {
+      if (!e.target.classList.contains("speaker-name")) return;
+      if (e.key === "Enter") e.target.blur();
+      if (e.key === "Escape") { e.target.value = (speakerIndex().get(e.target.closest(".speaker-row").dataset.key) || {}).name || ""; e.target.blur(); }
+    });
+    $("speaker-menu").addEventListener("click", (e) => {
+      const button = e.target.closest("[data-pick]");
+      if (button) pickSpeaker(button.dataset.pick);
+    });
+
+    const player = $("player");
+    player.addEventListener("play", () => {
+      const range = playRange();
+      if (range && (player.currentTime < range.start || player.currentTime >= range.end - 0.1)) player.currentTime = range.start;
+      renderSpeakerPlaying();
+    });
+    player.addEventListener("pause", renderSpeakerPlaying);
+    player.addEventListener("seeked", keepInRange);
+    player.addEventListener("timeupdate", onPlayerTime);
+    // A seek by hand (native scrubber, timestamp) cancels a pending sample stop.
+    player.addEventListener("seeking", () => { if (state.stopAt !== null && (player.currentTime < state.stopAt - 30 || player.currentTime > state.stopAt)) state.stopAt = null; });
 
     $("player").addEventListener("timeupdate", () => {
       const t = $("player").currentTime;

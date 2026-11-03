@@ -232,7 +232,8 @@ def remove_audio(session_id: str, audio: dict[str, Any] | None, keep: str | None
         shutil.rmtree(target, ignore_errors=True)
     else:
         target.unlink(missing_ok=True)
-        (root / f"export-{target.stem}.mp3").unlink(missing_ok=True)
+        for derived in [*root.glob(f"export-{target.stem}*.mp3"), root / f"waveform-{target.stem}.json"]:
+            derived.unlink(missing_ok=True)
 
 
 def recover_interrupted() -> None:

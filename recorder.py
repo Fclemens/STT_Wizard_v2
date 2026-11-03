@@ -320,11 +320,13 @@ def mix_tracks(track_paths: list[Path], target: Path) -> None:
         handle.writeframes((mix * 32767).astype(np.int16).tobytes())
 
 
-def export_mp3(sources: list[Path], target: Path) -> None:
-    """Encode one or more sources (mixed) to a 48 kHz mono MP3 for sharing."""
+def export_mp3(sources: list[Path], target: Path, span: tuple[float, float] | None = None) -> None:
+    """Encode one or more sources (mixed) to a 48 kHz mono MP3 for sharing; only ``span`` when trimmed."""
     import av
 
     mix = _mix(sources, EXPORT_RATE)
+    if span:
+        mix = mix[int(span[0] * EXPORT_RATE) : int(span[1] * EXPORT_RATE)]
     partial = target.with_suffix(".part")
     with av.open(str(partial), "w", format="mp3") as container:
         stream = container.add_stream("libmp3lame", rate=EXPORT_RATE, layout="mono")
@@ -340,6 +342,22 @@ def export_mp3(sources: list[Path], target: Path) -> None:
         for packet in stream.encode(None):
             container.mux(packet)
     partial.replace(target)
+
+
+def waveform(path: Path, buckets: int = 1500) -> dict[str, Any]:
+    """Peak level per time slice (0..1), for drawing the trim view. Returns duration and peaks."""
+    from stt_engine import load_audio
+
+    rate = 8000
+    audio = load_audio(path, rate=rate)
+    duration = len(audio) / rate
+    if not len(audio):
+        return {"duration": 0.0, "peaks": []}
+    size = max(1, int(np.ceil(len(audio) / buckets)))
+    padded = np.pad(np.abs(audio), (0, size * int(np.ceil(len(audio) / size)) - len(audio)))
+    peaks = padded.reshape(-1, size).max(axis=1)
+    top = float(np.percentile(peaks, 99)) or 1.0
+    return {"duration": round(duration, 2), "peaks": [round(float(v), 3) for v in np.minimum(peaks / top, 1.0)]}
 
 
 def repair_wav(path: Path) -> float:

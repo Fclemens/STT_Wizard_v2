@@ -85,7 +85,8 @@ Everything happens on one page per session:
 1. Click `+ New session`.
 2. **Record** (default): tick `Microphone` and/or `System audio`, pick the devices, optionally `Check levels`, then `Start recording`.
    - System audio captures what plays on the chosen output (the other people in a Teams/Zoom call, a video…).
-   - With both on, each transcript line is labelled **Me** (microphone) or **Others** (system audio).
+   - With both on, your lines are labelled **Me** (microphone) and the other voices are told apart
+     (see [Speakers](#speakers)).
    - Pause/resume any time. `Stop & transcribe` mixes the tracks and starts transcription automatically.
    - Recording runs in the app, not the browser tab: closing or refreshing the page does not stop it.
      If the app itself closes mid-recording, the audio captured so far is recovered on next start.
@@ -99,17 +100,52 @@ Everything happens on one page per session:
    Settings; otherwise click `Run review`). Suspicious words are highlighted in the transcript; apply, edit or
    dismiss each suggestion.
 5. Click a timestamp to play the audio from that line; click any line to edit it.
+   Name the speakers in the **Speakers** panel (see [Speakers](#speakers)).
 6. Export the corrected or original transcript as TXT, SRT, VTT or JSON.
 7. Run Analysis for a summary, key points, action items and open questions.
 
 Recordings are kept per session in `data/sessions/<id>/audio/rec-*/`: `mic.wav` and `system.wav` (16-bit WAV at the
 device rate, usually 48 kHz) and `mix.wav` (16 kHz, used for transcription). About 800 MB per hour with both sources.
 
-`Export MP3` on the audio bar saves a 48 kHz, 128 kbps MP3 of both sources mixed (about 60 MB per hour).
-The export is cached next to the recording.
+The **⋮** button next to the player has:
+
+- `Trim…`: drag the handles on the waveform (or type times) to cut chatter before and after the meeting.
+  Only the kept part is played, transcribed, reviewed and exported. The files are not cut: `Undo trim` brings
+  everything back. Trimming an existing transcript hides the lines outside the kept part (no need to transcribe again).
+- `Export MP3`: a 48 kHz, 128 kbps MP3 of both sources mixed (about 60 MB per hour), of the kept part only when
+  trimmed. The export is cached next to the recording.
+- Playback speed.
 
 Each session holds one recording or file; for another meeting, click `+ New session`.
 Deleting a session deletes all its files, including recordings and exports.
+
+## Speakers
+
+After transcription the app tells the voices apart (on by default; `Detect speakers` in Transcription settings).
+
+- Recording microphone + system audio: your lines are **Me** (from your microphone); the other people are told
+  apart on the system audio as Speaker 1, Speaker 2…
+- Uploaded files, or one source only: all voices are told apart.
+- Set `Number of speakers` when you know it (for a recording with both sources, count only the other people);
+  `Auto-detect` decides by itself.
+- One voice only: lines are left unlabelled.
+
+The **Speakers** panel lists each speaker with their talk time:
+
+- Type a name to rename them everywhere (transcript, exports, Analysis). Names are also given to Review as
+  correct spellings.
+- ▶ plays a few seconds of their voice (click again for another sample).
+- `Merge into…` when one person was split in two; ✕ removes a speaker; `+ Add speaker` adds someone who was missed.
+- `Detect again` (optionally with a number of speakers) redoes it; the names you gave are reset, except Me.
+
+In the transcript, click a line's speaker label to move it to someone else (or `+ New speaker…`); Shift-click a
+second label to move all the lines in between. A line where the voice changes part-way is split at that word.
+
+How it works: a voice fingerprint (3D-Speaker ERes2Net, ~40 MB, downloaded from GitHub on first use into
+`models\speakers`) is computed every few seconds along each line, and stretches with similar voices are grouped.
+It runs on the CPU: about 2–3 minutes per hour of speech. If the model cannot be downloaded, the transcript is kept
+(with Me/Others labels for two-source recordings) and a notice explains why. It gets confused by people talking over each other, very short replies and similar voices, so check the
+labels before relying on them.
 
 ## Glossary
 
