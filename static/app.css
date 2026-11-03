@@ -401,6 +401,8 @@ dialog.settings .card-head h2 { margin-right: auto; }
 .menu > button:disabled { opacity: 0.45; cursor: not-allowed; }
 .menu > button svg { color: var(--accent); flex: none; }
 .menu.open-right { right: auto; left: 0; }
+/* Cards are blurred, so each one is its own layer: lift the one with an open menu above the cards below it. */
+.card:has(.menu:not([hidden])) { position: relative; z-index: 30; }
 .menu-sep { height: 1px; margin: 4px 2px; background: var(--line); }
 .menu-label { padding: 4px 10px 2px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .menu-speeds { display: flex; gap: 3px; padding: 2px 6px 4px; }
