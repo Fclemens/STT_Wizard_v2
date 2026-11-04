@@ -121,7 +121,10 @@ Deleting a session deletes all its files, including recordings and exports.
 
 ## Speakers
 
-After transcription the app tells the voices apart (on by default; `Detect speakers` in Transcription settings).
+After transcription the app tells the voices apart and labels each line with who is speaking. Labels can be
+switched off: `Settings → Speaker labels by default`, `Transcription settings → Speaker labels` for one transcription,
+or the `Labels` switch on the Speakers panel at any time (off removes every label and name; on detects them again).
+With labels off, transcripts, exports and Analysis have no speaker names.
 
 - Recording microphone + system audio: your lines are **Me** (from your microphone); the other people are told
   apart on the system audio as Speaker 1, Speaker 2…
@@ -139,10 +142,13 @@ The **Speakers** panel lists each speaker with their talk time:
 - `Detect again` (optionally with a number of speakers) redoes it; the names you gave are reset, except Me.
 
 In the transcript, click a line's speaker label to move it to someone else (or `+ New speaker…`); Shift-click a
-second label to move all the lines in between. A line where the voice changes part-way is split at that word.
+second label to move all the lines in between. A line where the voice changes part-way is split there (at the
+exact word for new transcripts; for transcripts made before November 2026 the cut is estimated from the text and can be
+a word or two off).
 
 How it works: a voice fingerprint (3D-Speaker ERes2Net, ~40 MB, downloaded from GitHub on first use into
-`models\speakers`) is computed every few seconds along each line, and stretches with similar voices are grouped.
+`models\speakers`) is computed every 0.75 s along each line; stretches with similar voices are grouped into
+speakers, then the voice is followed inside each line, so a quick back-and-forth within one line is caught.
 It runs on the CPU: about 2–3 minutes per hour of speech. If the model cannot be downloaded, the transcript is kept
 (with Me/Others labels for two-source recordings) and a notice explains why. It gets confused by people talking over each other, very short replies and similar voices, so check the
 labels before relying on them.

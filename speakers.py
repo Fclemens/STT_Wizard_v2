@@ -4,19 +4,23 @@
   ~40 MB, downloaded on first use) is computed over short windows of each line.
   On a real Teams call it told the user's voice from the others' far better
   than WeSpeaker ResNet34 or TitaNet (same-vs-different separation 0.99).
-* Lines are grouped by voice: agglomerative clustering on cosine similarity,
-  stopping when the closest groups are no longer similar enough (or at the
-  number of speakers the user asked for).
+* The voices are found by grouping ~4 s chunks: agglomerative clustering on
+  cosine similarity, stopping when the closest groups are no longer similar
+  enough (or at the number of speakers the user asked for).
+* Then every window (0.75 s apart) gets the closest voice, smoothed over its
+  neighbours: Whisper lines are long and often hold a quick back-and-forth,
+  so the voice is followed inside each line, not decided once per line.
 * Very short lines ("yes", "ok") have too little sound for a reliable
   fingerprint; they take the speaker of the nearest line.
-* A long line where the voice clearly changes part-way is split at the word
-  where the change happens (when Whisper's word timings are available).
+* A line where the voice changes part-way is split there, at the nearest word
+  (Whisper's word timings; without them, the text is cut in proportion to time).
 
 Speakers are anonymous ("Speaker 1", "Speaker 2"…): the user names them.
 """
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -30,14 +34,14 @@ MODEL_FILE = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
 MODEL_URL = f"https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/{MODEL_FILE}"
 MODEL_PATH = MODELS_DIR / "speakers" / MODEL_FILE
 
-WINDOW_SECONDS = 2.0        # fingerprint window...
-STEP_SECONDS = 1.0          # ...moved by this much along a line
+WINDOW_SECONDS = 1.5        # fingerprint window...
+STEP_SECONDS = 0.75         # ...moved by this much along a line
 MIN_LINE_SECONDS = 0.8      # shorter lines take their neighbour's speaker
 SAME_VOICE = 0.45           # cosine similarity above which two groups are merged
 MIN_SPEAKER_SECONDS = 10.0  # auto mode: smaller groups are folded into the closest one...
 MIN_SPEAKER_SHARE = 0.02    # ...unless they hold this share of the talk time
-CHUNK_WINDOWS = 3           # windows per chunk (~4 s): the unit that is grouped by voice
-SPLIT_MIN_SECONDS = 3.0     # a voice change inside a line must last this long to split it
+CHUNK_WINDOWS = 4           # windows per chunk (~4 s): the unit that is grouped by voice
+SPLIT_MIN_SECONDS = 1.5     # a voice change inside a line must last this long to split it
 
 _extractor = None
 _lock = threading.Lock()
@@ -175,8 +179,9 @@ def detect(
 ) -> tuple[dict[str, int], dict[str, list[tuple[float, int]]]]:
     """Group the given lines by voice.
 
-    Returns (speaker number per line id, numbered 1.. by first appearance;
-    voice changes inside lines: line id -> [(time, speaker), ...] after the first part).
+    Returns (speaker number per line id, numbered 1.. by first appearance, the one who
+    speaks most of the line; for lines where the voice changes: line id -> its lasting
+    runs [(start, speaker), ...], first one included).
     """
     extractor = _get_extractor()
     timed = [seg for seg in segments if seg.get("start") is not None and seg["end"] - seg["start"] >= MIN_LINE_SECONDS]
@@ -196,39 +201,55 @@ def detect(
     if not timed:
         return {}, {}
 
-    # Chunks of up to CHUNK_WINDOWS windows (~4 s) inside each line are what gets grouped:
-    # a long line where two people speak must not blur into one averaged voice.
+    # 1. Find the voices: chunks of up to CHUNK_WINDOWS windows (~4 s) inside each line are
+    #    grouped (a long line where two people speak must not blur into one averaged voice).
     owner = np.array([w[0] for w in windows])
-    chunks: list[tuple[int, float, float, np.ndarray]] = []  # (line index, start, end, vector)
+    chunk_of = np.zeros(len(windows), dtype=int)
+    chunk_vectors, weights = [], []
     for index, seg in enumerate(timed):
         rows = np.where(owner == index)[0]
         for k in range(0, len(rows), CHUNK_WINDOWS):
             part = rows[k : k + CHUNK_WINDOWS]
+            chunk_of[part] = len(chunk_vectors)
             mean = vectors[part].mean(axis=0)
-            start, end = windows[part[0]][1], min(windows[part[-1]][2], float(seg["end"]))
-            chunks.append((index, start, end, mean / (np.linalg.norm(mean) + 1e-9)))
-    chunk_vectors = np.stack([c[3] for c in chunks])
-    weights = np.array([max(c[2] - c[1], 0.1) for c in chunks], dtype=np.float32)
-    groups = cluster(chunk_vectors, weights, count)
+            chunk_vectors.append(mean / (np.linalg.norm(mean) + 1e-9))
+            weights.append(max(min(windows[part[-1]][2], float(seg["end"])) - windows[part[0]][1], 0.1))
+    groups = cluster(np.stack(chunk_vectors), np.array(weights, dtype=np.float32), count)
+    roots = sorted(set(int(g) for g in groups))
+    voices = np.stack([np.mean([chunk_vectors[i] for i in range(len(groups)) if groups[i] == r], axis=0) for r in roots])
+    voices /= np.linalg.norm(voices, axis=1, keepdims=True) + 1e-9
+
+    # 2. Follow the voice window by window: closest voice, averaged with the neighbouring
+    #    windows of the same line so that a single odd window does not flip it.
+    similarity = vectors @ voices.T
+    label = np.zeros(len(windows), dtype=int)
+    for index in range(len(timed)):
+        rows = np.where(owner == index)[0]
+        smooth = np.array([similarity[rows[max(k - 1, 0) : k + 2]].mean(axis=0) for k in range(len(rows))])
+        label[rows] = smooth.argmax(axis=1)
 
     # Number speakers 1.. in order of first appearance.
     numbers: dict[int, int] = {}
-    for g in groups:
-        numbers.setdefault(int(g), len(numbers) + 1)
+    for value in label:
+        numbers.setdefault(int(value), len(numbers) + 1)
 
-    # Each line: the speaker of most of its time; lasting changes inside it are reported for splitting.
+    # 3. Each line: the speaker of most of its time, plus its lasting runs for splitting.
     by_line: dict[str, int] = {}
     changes: dict[str, list[tuple[float, int]]] = {}
     for index, seg in enumerate(timed):
-        mine = [(chunks[i][1], chunks[i][2] - chunks[i][1], numbers[int(groups[i])]) for i in range(len(chunks)) if chunks[i][0] == index]
+        rows = np.where(owner == index)[0]
+        start, end = float(seg["start"]), float(seg["end"])
+        # Each window speaks for the stretch around its centre; the first and last reach the line's edges.
+        centres = [(windows[r][1] + windows[r][2]) / 2 for r in rows]
+        edges = [start] + [(a + b) / 2 for a, b in zip(centres, centres[1:])] + [end]
+        mine = [(edges[k], edges[k + 1] - edges[k], numbers[int(label[r])]) for k, r in enumerate(rows)]
         talk: dict[int, float] = {}
         for _, seconds, number in mine:
             talk[number] = talk.get(number, 0.0) + seconds
         by_line[seg["id"]] = max(talk, key=talk.get)
         parts = _runs(mine)
         if len(parts) > 1:
-            by_line[seg["id"]] = parts[0][1]
-            changes[seg["id"]] = parts[1:]
+            changes[seg["id"]] = parts
 
     # Short lines: speaker of the nearest line in time.
     labelled = [seg for seg in segments if seg["id"] in by_line]
@@ -265,26 +286,47 @@ def _last_speaker(seg: dict[str, Any], by_line: dict[str, int], changes: dict[st
     return parts[-1][1] if parts else by_line[seg["id"]]
 
 
-def split_line(segment: dict[str, Any], changes: list[tuple[float, int]], first: int) -> list[tuple[dict[str, Any], int]]:
-    """Split a line where the voice changes. Needs Whisper's word timings.
+def _estimated_words(segment: dict[str, Any]) -> list[list]:
+    """Word timings guessed from the text, in proportion to its length (lines transcribed
+    before word timings were kept)."""
+    tokens = re.findall(r"\S+\s*", segment.get("text") or "")
+    total = sum(len(token) for token in tokens)
+    if not total:
+        return []
+    start, span = float(segment["start"]), float(segment["end"]) - float(segment["start"])
+    words, done = [], 0
+    for token in tokens:
+        words.append([start + span * done / total, start + span * (done + len(token)) / total, " " + token.strip()])
+        done += len(token)
+    return words
 
-    Window times are coarse (±1 s), so each cut goes to the most natural place near the
+
+def split_line(segment: dict[str, Any], runs: list[tuple[float, int]], fallback: int) -> list[tuple[dict[str, Any], int]]:
+    """Split a line at its voice changes (``runs``: [(start, speaker), ...]).
+
+    Window times are coarse (±0.75 s), so each cut goes to the most natural place near the
     change: after a sentence end or before the longest pause, else the nearest word.
+    Uses Whisper's word timings, else timings estimated from the text. A line that was
+    edited (or cannot be cut) stays whole with the ``fallback`` speaker.
     """
-    words = segment.get("words") or []
-    if len(words) < 2 or segment.get("text") != segment.get("original_text"):
-        return [(segment, first)]
+    if segment.get("text") != segment.get("original_text"):
+        return [(segment, fallback)]
+    real = bool(segment.get("words"))
+    words = segment.get("words") or _estimated_words(segment)
+    if len(words) < 2 or len(runs) < 2:
+        return [(segment, fallback)]
+    first = runs[0][1]
     cuts: list[tuple[int, int]] = []  # (index of the first word of the new piece, speaker)
-    for at, speaker in changes:
+    for at, speaker in runs[1:]:
         lowest = cuts[-1][0] + 1 if cuts else 1
         candidates = [i for i in range(lowest, len(words)) if abs(words[i][0] - at) <= 1.5]
-        if not candidates:
+        if not candidates or speaker == (cuts[-1][1] if cuts else first):
             continue
 
         def score(i: int) -> float:
             pause = words[i][0] - words[i - 1][1]
             sentence = words[i - 1][2].strip().endswith((".", "?", "!", "。", "？", "！"))
-            return pause + (1.0 if sentence else 0.0) - abs(words[i][0] - at) * 0.1
+            return pause + (1.0 if sentence else 0.0) - abs(words[i][0] - at) * 0.4
 
         cuts.append((max(candidates, key=score), speaker))
     pieces: list[tuple[list, int]] = []
@@ -303,9 +345,10 @@ def split_line(segment: dict[str, Any], changes: list[tuple[float, int]], first:
             "end": round(chunk[-1][1], 2),
             "text": text,
             "original_text": text,
-            "words": chunk,
         }
+        if real:
+            line["words"] = chunk
         result.append((line, speaker))
     if len(result) < 2:
-        return [(segment, first)]
+        return [(segment, fallback)]
     return result

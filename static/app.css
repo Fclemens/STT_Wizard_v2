@@ -446,6 +446,9 @@ dialog.settings .card-head h2 { margin-right: auto; }
 
 /* Speakers ---------------------------------------------------------------- */
 .select-sm { padding: 4px 8px; font-size: 12px; }
+#speakers-card .card-head .check { font-size: 0.85rem; color: var(--muted); }
+#speakers-card.is-off .card-head { margin-bottom: 0; }
+#speakers-card.is-off .speaker-list { display: none; }
 .speaker-list { display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
 .speaker-row {
   display: grid; grid-template-columns: 14px minmax(140px, 220px) minmax(120px, 1fr) auto; gap: 12px; align-items: center;

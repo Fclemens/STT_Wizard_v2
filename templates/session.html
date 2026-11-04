@@ -179,7 +179,7 @@
               </label>
               <label class="check"><input type="checkbox" id="opt-accurate" /> Accurate decoding <span class="muted small">(beam search, slower)</span></label>
               <label class="check"><input type="checkbox" id="opt-translate" /> Translate to English</label>
-              <label class="check"><input type="checkbox" id="opt-speakers" /> Detect speakers <span class="muted small">(tell the voices apart)</span></label>
+              <label class="check"><input type="checkbox" id="opt-speakers" /> Speaker labels <span class="muted small">(who is speaking on each line)</span></label>
               <label>Number of speakers
                 <select id="opt-speaker-count"></select>
                 <span class="muted small">Recording your microphone and system audio? Count only the other people.</span>
@@ -211,6 +211,7 @@
         <section class="card" id="speakers-card" hidden>
           <div class="card-head">
             <h2>Speakers</h2>
+            <label class="check small" title="Label each line with who is speaking"><input type="checkbox" id="speaker-labels" /> Labels</label>
             <span class="muted small" id="speakers-meta"></span>
             <div class="card-actions">
               <select id="detect-count" class="select-sm" aria-label="Number of speakers to detect"></select>
@@ -302,7 +303,7 @@
           <label>Default model <select id="set-default-model"></select></label>
           <label>Default language <input id="set-default-language" list="language-list" placeholder="Auto-detect" /></label>
           <label class="check"><input type="checkbox" id="set-accurate" /> Accurate decoding by default</label>
-          <label class="check"><input type="checkbox" id="set-speakers" /> Detect speakers by default</label>
+          <label class="check"><input type="checkbox" id="set-speakers" /> Speaker labels by default</label>
           <label class="span-2">Default glossary <span class="muted small">(added to every session; also used by Review)</span>
             <textarea id="set-glossary" rows="6" placeholder="One term per line"></textarea>
           </label>

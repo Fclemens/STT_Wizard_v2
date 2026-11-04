@@ -465,6 +465,33 @@ def api_detect_speakers(session_id: str, payload: dict[str, Any] = Body(default=
     return JSONResponse(store.public_view(require_session(session_id)))
 
 
+@app.post("/api/sessions/{session_id}/speakers/labels")
+def api_speaker_labels(session_id: str, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    """Turn speaker labels off (every label and name is dropped) or back on (detects the voices
+    when there is audio to detect them in)."""
+    session = require_session(session_id)
+    if payload.get("on"):
+        transcript = session.get("transcript") or {}
+        if session.get("audio") and transcript.get("source") != "import":
+            count = payload.get("count")
+            try:
+                pipeline.start_speaker_detection(session_id, int(count) if count else None)
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return JSONResponse(store.public_view(require_session(session_id)))
+        with store.edit(session_id) as live:
+            _speaker_map(live)
+        return session_response(session_id)
+    with store.edit(session_id) as live:
+        _speaker_map(live)
+        transcript = live["transcript"]
+        for seg in transcript.get("segments", []) + transcript.get("trimmed_out", []):
+            seg["speaker"] = None
+        transcript["speaker_map"] = {}
+        transcript["speaker_labels"] = False
+    return session_response(session_id)
+
+
 @app.post("/api/sessions/{session_id}/stop")
 def api_stop(session_id: str) -> dict[str, Any]:
     require_session(session_id)
@@ -519,6 +546,7 @@ def _speaker_map(live: dict[str, Any]) -> dict[str, dict[str, str]]:
         raise HTTPException(status_code=404, detail="No transcript yet.")
     if live.get("status") in ("transcribing", "diarizing"):
         raise HTTPException(status_code=409, detail="Wait for the current step to finish.")
+    transcript["speaker_labels"] = True  # editing speakers means labels are wanted
     speakers_map = transcript.setdefault("speaker_map", {})
     for seg in transcript.get("segments", []):
         if seg.get("speaker") and seg["speaker"] not in speakers_map:

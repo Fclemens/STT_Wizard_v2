@@ -93,6 +93,7 @@ def start_transcription(session_id: str, options: dict[str, Any]) -> None:
             "task": options.get("task", "transcribe"),
             "accurate": bool(options.get("accurate", True)),
             "glossary_used": bool(options.get("glossary")),
+            "speaker_labels": bool(options.get("speakers", True)),
             "device": None,
             "started_at": store.now_iso(),
             "completed_at": None,
@@ -165,7 +166,7 @@ def _run_transcription(session_id: str, job_id: str, options: dict[str, Any]) ->
         traceback.print_exc()
         _fail(session_id, f"Transcription failed: {exc}")
         return
-    if not meta.get("stopped"):
+    if not meta.get("stopped") and options.get("speakers", True):
         _label_lines(session_id, options, lambda stage, pct: _set_job(session_id, stage, pct))
     _finish_transcription(session_id, meta)
 
@@ -204,9 +205,7 @@ def _label_lines(session_id: str, options: dict[str, Any], on_progress) -> None:
         return
     notice = None
     try:
-        segments, speaker_map = compute_speakers(
-            session, bool(options.get("speakers", True)), options.get("speaker_count"), on_progress
-        )
+        segments, speaker_map = compute_speakers(session, True, options.get("speaker_count"), on_progress)
     except Exception as exc:  # noqa: BLE001 - speaker labels must never cost the transcript
         traceback.print_exc()
         notice = f"Speaker detection failed ({exc}). The transcript is fine; try Detect speakers later."
@@ -306,6 +305,7 @@ def start_speaker_detection(session_id: str, count: int | None) -> None:
             raise RuntimeError("There is no transcribed audio to detect speakers in.")
         live["status"] = "diarizing"
         live["error"] = None
+        live["transcript"]["speaker_labels"] = True
         job = _new_job("speakers")
         job.update(stage="speakers", message=STAGE_MESSAGES["speakers"])
         live["job"] = job
@@ -330,6 +330,7 @@ def _run_speaker_detection(session_id: str, count: int | None) -> None:
         transcript = live["transcript"]
         transcript["segments"] = segments
         transcript["speaker_map"] = speaker_map
+        transcript["speaker_labels"] = True
         _forget_old_speakers(transcript)
         live["status"] = "ready"
         live["job"] = None

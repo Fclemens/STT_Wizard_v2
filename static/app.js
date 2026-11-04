@@ -618,11 +618,15 @@
     return spk ? `${spk.key}|${spk.name}|${spk.color}` : "";
   };
 
+  // Speaker labels can be switched off per session (older transcripts: on).
+  const labelsOn = () => Boolean(state.session.transcript) && state.session.transcript.speaker_labels !== false;
+
   function lineHtml(seg, pending, speakers) {
     const timed = seg.start !== null && seg.start !== undefined;
     const edited = seg.text !== seg.original_text;
     const spk = seg.speaker ? speakers.get(seg.speaker) : null;
-    const label = spk
+    const label = !labelsOn() ? ""
+      : spk
       ? `<button type="button" class="speaker" data-speaker-btn style="--spk:${spk.color}" title="${esc(spk.name)}: click to change">${esc(spk.name)}</button>`
       : `<button type="button" class="speaker is-none" data-speaker-btn title="Set the speaker">+</button>`;
     return `<div class="line ${edited ? "is-edited" : ""}" id="line-${seg.id}" data-id="${seg.id}" data-speaker="${esc(speakerKey(seg, speakers))}">
@@ -660,6 +664,8 @@
     const order = list.map((seg) => seg.id).join(",");
     if (container.dataset.order && !order.startsWith(container.dataset.order) && !full) full = true;
     container.dataset.order = order;
+    if ((container.dataset.labels || "") !== String(labelsOn())) full = true;
+    container.dataset.labels = String(labelsOn());
     if (full || container.querySelector(".placeholder")) container.innerHTML = "";
     const existing = new Map([...container.children].map((el) => [el.dataset.id, el]));
     const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
@@ -839,7 +845,18 @@
     if (card.hidden) return closeSpeakerMenu();
     const canDetect = Boolean(s.audio) && t.source !== "import";
     const list = speakerList();
-    $("detect-speakers").hidden = $("detect-count").hidden = !canDetect;
+    const on = labelsOn();
+    $("speaker-labels").checked = on;
+    $("speaker-labels").disabled = busy();
+    card.classList.toggle("is-off", !on);
+    $("detect-speakers").hidden = $("detect-count").hidden = !canDetect || !on;
+    $("add-speaker").hidden = !on;
+    if (!on) {
+      $("speakers-meta").textContent = "";
+      $("speakers-hint").hidden = true;
+      $("speaker-list").innerHTML = "";
+      return closeSpeakerMenu();
+    }
     $("detect-speakers").disabled = busy();
     $("detect-speakers").textContent = list.length ? "Detect again" : "Detect speakers";
     $("add-speaker").disabled = busy();
@@ -932,6 +949,17 @@
     const name = prompt("Name of the new speaker:");
     if (name === null) return;
     await speakerRequest("/speakers", { method: "POST", json: { name: name.trim(), segments: segmentIds } });
+  }
+
+  async function toggleLabels(input) {
+    const on = input.checked;
+    const named = speakerList().some((spk) => !/^(Speaker \d+|Others|Me)$/.test(spk.name));
+    if (!on && named && !confirm("Remove the speaker labels? The names you gave the speakers are lost.")) {
+      input.checked = true;
+      return;
+    }
+    const session = await speakerRequest("/speakers/labels", { method: "POST", json: { on, count: Number($("detect-count").value) || null } });
+    if (!session) input.checked = !on;
   }
 
   async function detectSpeakers() {
@@ -1377,6 +1405,7 @@
     fillSpeakerCount($("opt-speaker-count"));
     $("opt-speakers").addEventListener("change", () => ($("opt-speaker-count").disabled = !$("opt-speakers").checked));
     $("detect-speakers").addEventListener("click", detectSpeakers);
+    $("speaker-labels").addEventListener("change", (e) => toggleLabels(e.target));
     $("add-speaker").addEventListener("click", () => addSpeaker());
     const speakerListEl = $("speaker-list");
     speakerListEl.addEventListener("click", async (e) => {
