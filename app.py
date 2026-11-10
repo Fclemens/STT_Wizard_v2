@@ -56,6 +56,33 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="STT Wizard", version="0.3.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=RESOURCE_DIR / "static"), name="static")
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+
+@app.middleware("http")
+async def only_this_app(request: Request, call_next):
+    """The server listens on localhost, but any web page open in a browser on this PC can
+    send it requests. Refuse them:
+
+    * Host must be localhost: a page whose domain is re-pointed at 127.0.0.1 (DNS
+      rebinding) would otherwise count as this app and could read every session.
+    * Requests made by another site (even another localhost port) are refused: it could
+      otherwise change settings, e.g. swap the OpenAI key for its own. Opening a page is
+      still allowed (the desktop window comes from its loading screen; the other site
+      cannot read the page).
+    """
+    host = (request.headers.get("host") or "").lower()
+    hostname = host.rsplit(":", 1)[0] if not host.endswith("]") else host
+    if hostname not in LOCAL_HOSTS:
+        return PlainTextResponse("Forbidden host.", status_code=403)
+    opening_page = request.method == "GET" and request.headers.get("sec-fetch-mode") == "navigate"
+    site = request.headers.get("sec-fetch-site")
+    origin = request.headers.get("origin")
+    foreign = site not in (None, "same-origin", "none") or (origin and origin.lower() != f"{request.url.scheme}://{host}")
+    if foreign and not opening_page:
+        return PlainTextResponse("Requests from other sites are not allowed.", status_code=403)
+    return await call_next(request)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 

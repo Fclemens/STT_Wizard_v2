@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -132,7 +133,7 @@ def _load(session_id: str) -> dict[str, Any] | None:
 
 def get_session(session_id: str) -> dict[str, Any] | None:
     """Return a detached copy of the session (safe to read without the lock)."""
-    if not session_id or "/" in session_id or "\\" in session_id or ".." in session_id:
+    if not re.fullmatch(r"[0-9a-z]{6,32}", session_id or ""):  # ids are short hex strings: nothing else is a path
         return None
     with _lock_for(session_id):
         payload = _load(session_id)
