@@ -205,6 +205,14 @@ Besides the Whisper sizes there is [Cohere Transcribe](https://huggingface.co/Co
 [OpenVoiceOS/cohere-transcribe-2b-onnx](https://huggingface.co/OpenVoiceOS/cohere-transcribe-2b-onnx)
 (2.1 GB, pinned to one revision, downloaded on first use into `models/cohere-transcribe`). It always runs on the CPU.
 
+### Parakeet (`parakeet` model)
+
+[NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) runs the same way (ONNX Runtime
+via `onnx-asr`, int8 export [istupakov/parakeet-tdt-0.6b-v3-onnx](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx),
+0.7 GB, pinned revision, `models/parakeet-tdt-0.6b-v3`, CPU). It is small and fast, detects the language itself among
+25 European languages (the Language box is ignored; Arabic and Asian languages are not covered), and returns real
+word timings, so sentence and speaker splits are as precise as with Whisper. No translate task, no glossary.
+
 Differences from Whisper: you must pick the language (Arabic, Chinese, Dutch, English, French, German, Greek,
 Italian, Japanese, Korean, Polish, Portuguese, Spanish, Vietnamese; no auto-detect), there is no translate task,
 the glossary is not used during transcription (Review still uses it), and there are no word timestamps, so line

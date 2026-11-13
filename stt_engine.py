@@ -30,6 +30,7 @@ import av
 import numpy as np
 
 import cohere_engine
+import parakeet_engine
 from paths import APP_DIR, RESOURCE_DIR
 
 MODELS_DIR = Path(os.getenv("WHISPER_MODEL_DIR") or APP_DIR / "models")
@@ -52,6 +53,13 @@ MODEL_OPTIONS: dict[str, dict[str, str]] = {
         "backend": "cohere",
         "size": "2.1 GB",
         "best_for": "Top English accuracy, 14 languages (choose one). CPU; no glossary or translate.",
+    },
+    # Not Whisper: NVIDIA Parakeet TDT 0.6B v3 via ONNX Runtime (see parakeet_engine.py). Detects the language.
+    "parakeet": {
+        "model": "parakeet-tdt-0.6b-v3",
+        "backend": "parakeet",
+        "size": "0.7 GB",
+        "best_for": "Fast, 25 European languages (auto-detected), real word timings. CPU; no glossary or translate.",
     },
 }
 
@@ -122,9 +130,15 @@ def is_cohere(key: str) -> bool:
     return MODEL_OPTIONS[key].get("backend") == "cohere"
 
 
+def is_parakeet(key: str) -> bool:
+    return MODEL_OPTIONS[key].get("backend") == "parakeet"
+
+
 def is_downloaded(key: str) -> bool:
     if is_cohere(key):
         return cohere_engine.is_downloaded(model_dir(key))
+    if is_parakeet(key):
+        return parakeet_engine.is_downloaded(model_dir(key))
     return (model_dir(key) / "model.bin").exists()
 
 
@@ -335,6 +349,13 @@ def transcribe(
         offset = max(0.0, span[0])
         audio = audio[int(offset * SAMPLE_RATE) : int(span[1] * SAMPLE_RATE)]
     duration = len(audio) / SAMPLE_RATE
+
+    if is_parakeet(model_name):
+        if task == "translate":
+            raise ValueError("Parakeet cannot translate: choose a Whisper model for that.")
+        meta = parakeet_engine.run(audio, duration, offset, model_dir(model_name), on_progress, on_segments, should_stop)
+        meta["duration"] = round(full_duration, 2)
+        return meta
 
     if is_cohere(model_name):
         if task == "translate":
