@@ -119,6 +119,23 @@ def lines_for_chunk(start: float, end: float, text: str) -> list[tuple[float, fl
     return lines
 
 
+TOKENS_PER_SECOND = 14  # generous: fast speech is ~4-5 words/s, about 8 tokens/s
+PROMPT_AND_MARGIN = 24
+
+
+def limit_decoding(model, seconds: float) -> None:
+    """Cap the tokens the decoder may produce for a chunk of ``seconds``.
+
+    Cohere's own examples cap generation (256 tokens); the library default is 1024. On sound the model
+    cannot read it loops until the cap, which took 24 s per chunk on CPU in a test; with a cap that
+    scales with the chunk it stops after ~1 s and normal speech is unchanged.
+    """
+    try:
+        model.asr.config["max_sequence_length"] = max(64, int(TOKENS_PER_SECOND * seconds) + PROMPT_AND_MARGIN)
+    except (AttributeError, TypeError):  # library internals changed: keep its default
+        pass
+
+
 _SPECIAL = re.compile(r"<unk>|<pad>|<s>|</s>|<\|[^|>]*\|>")
 
 
@@ -163,6 +180,7 @@ def run(
             stopped = True
             break
         clip = audio[int(start * SAMPLE_RATE) : int(end * SAMPLE_RATE)]
+        limit_decoding(model, end - start)
         text = clean_text(str(model.recognize(clip, sample_rate=SAMPLE_RATE, language=code, pnc=True)))
         if not text:
             skipped += 1
