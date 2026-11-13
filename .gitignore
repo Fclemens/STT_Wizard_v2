@@ -26,3 +26,4 @@ models/
 # Desktop app runtime files
 logs/
 webview-cache/
+gpu_check_report.txt
