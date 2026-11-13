@@ -24,8 +24,8 @@ from stt_engine import SAMPLE_RATE, load_audio, transcribe
 
 STAGE_MESSAGES = {
     "queued": "Waiting for the previous transcription to finish.",
-    "downloading_model": "Downloading the Whisper model (first use only)…",
-    "loading_model": "Loading the Whisper model…",
+    "downloading_model": "Downloading the speech model (first use only)…",
+    "loading_model": "Loading the speech model…",
     "loading_audio": "Decoding the audio.",
     "transcribing": "Transcribing — lines appear as they are ready.",
     "stopping": "Stopping after the current window…",

@@ -196,3 +196,16 @@ data
 Transcription uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper). With an NVIDIA GPU it runs on the GPU
 (int8/float16: `turbo` needs about 2 GB of video memory); otherwise, or if the GPU fails, it runs on the CPU.
 FFmpeg is not needed: audio is decoded with PyAV.
+
+### Cohere Transcribe (`cohere` model)
+
+Besides the Whisper sizes there is [Cohere Transcribe](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026)
+(2B parameters, Apache 2.0, top of the Open ASR Leaderboard for English). It runs through ONNX Runtime
+(`onnx-asr`, no PyTorch) from the community int8 export
+[OpenVoiceOS/cohere-transcribe-2b-onnx](https://huggingface.co/OpenVoiceOS/cohere-transcribe-2b-onnx)
+(2.1 GB, pinned to one revision, downloaded on first use into `models/cohere-transcribe`). It always runs on the CPU.
+
+Differences from Whisper: you must pick the language (Arabic, Chinese, Dutch, English, French, German, Greek,
+Italian, Japanese, Korean, Polish, Portuguese, Spanish, Vietnamese; no auto-detect), there is no translate task,
+the glossary is not used during transcription (Review still uses it), and there are no word timestamps, so line
+times are estimated from sentence length within each speech stretch. Accurate decoding has no effect.

@@ -40,7 +40,8 @@ datas = (
 )
 hiddenimports = (
     collect_submodules("uvicorn")
-    + ["app", "speakers", "sherpa_onnx", "pyaudiowpatch", "webview.platforms.edgechromium", "webview.platforms.winforms"]
+    + collect_submodules("onnx_asr")  # Cohere Transcribe backend
+    + ["app", "cohere_engine", "speakers", "sherpa_onnx", "pyaudiowpatch", "webview.platforms.edgechromium", "webview.platforms.winforms"]
 )
 # Never bundle these even if they are installed in the build environment.
 excludes = ["torch", "whisper", "numba", "llvmlite", "tkinter", "matplotlib", "IPython", "pytest"]

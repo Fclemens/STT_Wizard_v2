@@ -5,6 +5,8 @@ python-multipart==0.0.20
 requests>=2.32.0
 numpy>=1.26
 faster-whisper>=1.1.0
+# Cohere Transcribe model (ONNX Runtime; no PyTorch)
+onnx-asr>=0.12
 av>=12
 # Speaker detection (voice fingerprints); has its own onnxruntime, separate from faster-whisper's
 sherpa-onnx>=1.12
