@@ -119,6 +119,25 @@ def lines_for_chunk(start: float, end: float, text: str) -> list[tuple[float, fl
     return lines
 
 
+_SPECIAL = re.compile(r"<unk>|<pad>|<s>|</s>|<\|[^|>]*\|>")
+
+
+def clean_text(raw: str) -> str:
+    """Drop the model's special tokens; return "" when the output is garbage.
+
+    On sound it cannot read (music, noise that passes the voice detector) the decoder loops and prints
+    ``<unk>`` until its length limit. Such chunks, and runaway repetitions, are skipped like Whisper's
+    hallucinations are.
+    """
+    from stt_engine import is_repetitive_hallucination
+
+    unknown = len(_SPECIAL.findall(raw))
+    text = re.sub(r"\s+", " ", _SPECIAL.sub("", raw)).strip()
+    if unknown >= 8 and unknown > len(text.split()):
+        return ""
+    return "" if is_repetitive_hallucination(text) else text
+
+
 def run(
     audio: np.ndarray,
     duration: float,
@@ -137,13 +156,16 @@ def run(
     on_progress("transcribing", 5)
 
     counter = 0
+    skipped = 0
     stopped = False
     for start, end in speech_chunks(audio):
         if should_stop():
             stopped = True
             break
         clip = audio[int(start * SAMPLE_RATE) : int(end * SAMPLE_RATE)]
-        text = str(model.recognize(clip, sample_rate=SAMPLE_RATE, language=code, pnc=True)).strip()
+        text = clean_text(str(model.recognize(clip, sample_rate=SAMPLE_RATE, language=code, pnc=True)))
+        if not text:
+            skipped += 1
         lines = []
         for a, b, sentence in lines_for_chunk(start, end, text):
             counter += 1
@@ -163,5 +185,6 @@ def run(
         "language": code,
         "device": "cpu · int8 (onnx)",
         "glossary_terms": None,
+        "skipped_chunks": skipped,
         "stopped": stopped,
     }
