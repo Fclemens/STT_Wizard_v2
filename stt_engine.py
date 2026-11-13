@@ -339,6 +339,9 @@ def transcribe(
     if is_cohere(model_name):
         if task == "translate":
             raise ValueError("Cohere Transcribe cannot translate: choose a Whisper model for that.")
+        if not (language or "").strip():
+            on_progress("loading_model", 4)
+            language = detect_supported_language(audio, tuple(cohere_engine.LANGUAGES))
         meta = cohere_engine.run(
             audio, duration, offset, language, model_dir(model_name), on_progress, on_segments, should_stop
         )
@@ -358,6 +361,20 @@ def transcribe(
         meta = _run(audio, duration, offset, "cpu", model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop)
     meta["duration"] = round(full_duration, 2)
     return meta
+
+
+def detect_supported_language(audio: np.ndarray, supported: tuple[str, ...]) -> str:
+    """Language of the recording using Whisper ``tiny`` (75 MB, CPU), limited to ``supported`` codes.
+
+    Used by models that cannot detect the language themselves. Looks at the first stretch of speech.
+    """
+    model = get_model("tiny", "cpu")
+    window = audio[: 60 * SAMPLE_RATE]
+    _, _, probabilities = model.detect_language(window, vad_filter=True, language_detection_segments=3)
+    ranked = [(code, prob) for code, prob in probabilities if code in supported]
+    if not ranked:
+        raise ValueError("Could not tell the language: choose it in the Language box.")
+    return max(ranked, key=lambda item: item[1])[0]
 
 
 def _run(audio, duration, offset, device, model_name, language, task, glossary, accurate, on_progress, on_segments, should_stop):
